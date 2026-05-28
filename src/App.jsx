@@ -49,22 +49,47 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
   const [forceLang, setForceLang] = useState(null)
+
+  // Fix #3 + #5: refs keep closures (debounce, mic onresult) reading the current value
+  const forceLangRef = useRef(null)
+  const detectedLangRef = useRef(null)
   const recognitionRef = useRef(null)
   const debounceRef = useRef(null)
+  // Fix #4: AbortController lets us cancel the previous in-flight request
+  const abortRef = useRef(null)
+
+  const clearOutput = () => {
+    setOutput('')
+    setDetectedLang(null)
+    detectedLangRef.current = null
+  }
 
   const translate = async (text, force) => {
-    if (!text.trim()) { setOutput(''); setDetectedLang(null); return }
+    if (!text.trim()) { clearOutput(); return }
+
+    // Cancel any previous request so stale responses never overwrite the latest
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setLoading(true)
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, forceLang: force }),
+        signal: controller.signal,
       })
-      const parsed = await res.json()
-      setOutput(parsed.translation || '')
-      setDetectedLang(parsed.detected || null)
-    } catch {
+      // Fix #1 (frontend side): surface server errors instead of silently showing blank
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.translation) throw new Error('bad response shape')
+      setOutput(data.translation)
+      setDetectedLang(data.detected || null)
+      detectedLangRef.current = data.detected || null
+    } catch (err) {
+      // AbortError means a newer request took over — leave loading/output untouched
+      if (err.name === 'AbortError') return
       setOutput('Deu ruim! Verifica a internet e tenta de novo.')
     }
     setLoading(false)
@@ -73,12 +98,14 @@ export default function App() {
   const handleInput = (val) => {
     setInput(val)
     clearTimeout(debounceRef.current)
-    if (!val.trim()) { setOutput(''); setDetectedLang(null); return }
-    debounceRef.current = setTimeout(() => translate(val, forceLang), 700)
+    if (!val.trim()) { clearOutput(); return }
+    // Fix #3: read forceLangRef.current at fire time, not at schedule time
+    debounceRef.current = setTimeout(() => translate(val, forceLangRef.current), 700)
   }
 
   const handleForce = (lang) => {
     const next = forceLang === lang ? null : lang
+    forceLangRef.current = next
     setForceLang(next)
     if (input.trim()) translate(input, next)
   }
@@ -87,16 +114,18 @@ export default function App() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) { alert('Teu navegador não manja de voz. Tenta no Chrome!'); return }
     const r = new SR()
-    r.continuous = false
-    r.interimResults = false
-    r.lang = forceLang === 'pt' ? 'pt-BR' : 'es-ES'
+    // Fix #5: use detectedLangRef so mic honors auto-detected language, not just forced one
+    const langKey = forceLangRef.current || detectedLangRef.current
+    r.lang = langKey === 'pt' ? 'pt-BR' : 'es-ES'
     r.onresult = (e) => {
       const t = e.results[0][0].transcript
       setInput(t)
-      translate(t, forceLang)
+      // Fix #3: read forceLangRef.current at result time, not at recording-start time
+      translate(t, forceLangRef.current)
     }
-    r.onend = () => setRecording(false)
-    r.onerror = () => setRecording(false)
+    const stop = () => setRecording(false)
+    r.onend = stop
+    r.onerror = stop
     r.start()
     recognitionRef.current = r
     setRecording(true)
@@ -104,10 +133,15 @@ export default function App() {
 
   const stopRecording = () => { recognitionRef.current?.stop(); setRecording(false) }
 
-  const copy = () => {
-    navigator.clipboard.writeText(output)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1600)
+  // Fix #6: await clipboard write before showing "Copiado!" — don't flash if it fails
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(output)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // write failed (HTTP page, tab not focused, etc.) — stay silent
+    }
   }
 
   const inputLangKey = forceLang || detectedLang
@@ -122,7 +156,6 @@ export default function App() {
 
       <main className="main">
 
-        {/* Language force selector */}
         <div className="lang-bar">
           <span className="lang-bar-label">De:</span>
           {Object.entries(LANGS).map(([code, { flag, label }]) => (
@@ -136,7 +169,6 @@ export default function App() {
           ))}
         </div>
 
-        {/* Input card */}
         <div className="card">
           <div className="card-header">
             {inputLangKey ? (
@@ -167,19 +199,17 @@ export default function App() {
             </button>
             <div className="spacer" />
             {input && (
-              <button className="btn-clear" onClick={() => { setInput(''); setOutput(''); setDetectedLang(null) }}>
+              <button className="btn-clear" onClick={() => { setInput(''); clearOutput() }}>
                 <ClearIcon /> Limpar
               </button>
             )}
           </div>
         </div>
 
-        {/* Arrow divider */}
         <div className="divider">
           <ArrowIcon />
         </div>
 
-        {/* Output card */}
         <div className="card">
           <div className="card-header">
             {targetLangKey ? (
