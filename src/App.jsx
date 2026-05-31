@@ -1,8 +1,7 @@
 import { useState, useRef } from 'react'
-import './App.css'
 
 const MicIcon = ({ active }) => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill={active ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill={active ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
     <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
     <line x1="12" y1="19" x2="12" y2="23"/>
@@ -10,35 +9,31 @@ const MicIcon = ({ active }) => (
   </svg>
 )
 
-const CopyIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="9" y="9" width="13" height="13" rx="2"/>
-    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-  </svg>
-)
-
-const CheckIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="20 6 9 17 4 12"/>
+const CopyIcon = ({ done }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    {done
+      ? <polyline points="20 6 9 17 4 12"/>
+      : <><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>
+    }
   </svg>
 )
 
 const ClearIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
   </svg>
 )
 
-const ArrowIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="12" y1="5" x2="12" y2="19"/>
-    <polyline points="19 12 12 19 5 12"/>
-  </svg>
-)
+const BR = {
+  grad: 'linear-gradient(135deg,#009c3b,#4dc87a)',
+  solid: '#009c3b', light: '#f0faf4', border: '#009c3b',
+  text: '#005c23', badge: '#ffdf00', badgeText: '#5a4200', flag: '🇧🇷'
+}
 
-const LANGS = {
-  es: { flag: '🇪🇸', label: 'Espanhol' },
-  pt: { flag: '🇧🇷', label: 'Português' },
+const ES = {
+  grad: 'linear-gradient(135deg,#aa151b,#e84040)',
+  solid: '#aa151b', light: '#fdf2f2', border: '#aa151b',
+  text: '#6b0d10', badge: '#f1bf00', badgeText: '#5a3d00', flag: '🇪🇸'
 }
 
 export default function App() {
@@ -48,48 +43,22 @@ export default function App() {
   const [recording, setRecording] = useState(false)
   const [copied, setCopied] = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
-  const [forceLang, setForceLang] = useState(null)
-
-  // Fix #3 + #5: refs keep closures (debounce, mic onresult) reading the current value
-  const forceLangRef = useRef(null)
-  const detectedLangRef = useRef(null)
   const recognitionRef = useRef(null)
   const debounceRef = useRef(null)
-  // Fix #4: AbortController lets us cancel the previous in-flight request
-  const abortRef = useRef(null)
 
-  const clearOutput = () => {
-    setOutput('')
-    setDetectedLang(null)
-    detectedLangRef.current = null
-  }
-
-  const translate = async (text, force) => {
-    if (!text.trim()) { clearOutput(); return }
-
-    // Cancel any previous request so stale responses never overwrite the latest
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-
+  const translate = async (text) => {
+    if (!text.trim()) { setOutput(''); setDetectedLang(null); return }
     setLoading(true)
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, forceLang: force }),
-        signal: controller.signal,
+        body: JSON.stringify({ text })
       })
-      // Fix #1 (frontend side): surface server errors instead of silently showing blank
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-      if (!data.translation) throw new Error('bad response shape')
-      setOutput(data.translation)
-      setDetectedLang(data.detected || null)
-      detectedLangRef.current = data.detected || null
-    } catch (err) {
-      // AbortError means a newer request took over — leave loading/output untouched
-      if (err.name === 'AbortError') return
+      const parsed = await res.json()
+      setOutput(parsed.translation || '')
+      setDetectedLang(parsed.detected || null)
+    } catch {
       setOutput('Deu ruim! Verifica a internet e tenta de novo.')
     }
     setLoading(false)
@@ -98,153 +67,195 @@ export default function App() {
   const handleInput = (val) => {
     setInput(val)
     clearTimeout(debounceRef.current)
-    if (!val.trim()) { clearOutput(); return }
-    // Fix #3: read forceLangRef.current at fire time, not at schedule time
-    debounceRef.current = setTimeout(() => translate(val, forceLangRef.current), 700)
-  }
-
-  const handleForce = (lang) => {
-    const next = forceLang === lang ? null : lang
-    forceLangRef.current = next
-    setForceLang(next)
-    if (input.trim()) translate(input, next)
+    if (!val.trim()) { setOutput(''); setDetectedLang(null); return }
+    debounceRef.current = setTimeout(() => translate(val), 700)
   }
 
   const startRecording = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) { alert('Teu navegador não manja de voz. Tenta no Chrome!'); return }
+    if (!SR) { alert('Tenta no Chrome!'); return }
     const r = new SR()
-    // Fix #5: use detectedLangRef so mic honors auto-detected language, not just forced one
-    const langKey = forceLangRef.current || detectedLangRef.current
-    r.lang = langKey === 'pt' ? 'pt-BR' : 'es-ES'
-    r.onresult = (e) => {
-      const t = e.results[0][0].transcript
-      setInput(t)
-      // Fix #3: read forceLangRef.current at result time, not at recording-start time
-      translate(t, forceLangRef.current)
-    }
-    const stop = () => setRecording(false)
-    r.onend = stop
-    r.onerror = stop
-    r.start()
-    recognitionRef.current = r
-    setRecording(true)
+    r.continuous = false; r.interimResults = false
+    r.lang = detectedLang === 'pt' ? 'pt-BR' : 'es-ES'
+    r.onresult = (e) => { const t = e.results[0][0].transcript; setInput(t); translate(t) }
+    r.onend = () => setRecording(false)
+    r.onerror = () => setRecording(false)
+    r.start(); recognitionRef.current = r; setRecording(true)
   }
 
   const stopRecording = () => { recognitionRef.current?.stop(); setRecording(false) }
 
-  // Fix #6: await clipboard write before showing "Copiado!" — don't flash if it fails
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(output)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    } catch {
-      // write failed (HTTP page, tab not focused, etc.) — stay silent
-    }
+  const copy = () => {
+    navigator.clipboard.writeText(output)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
   }
 
-  const inputLangKey = forceLang || detectedLang
-  const targetLangKey = inputLangKey === 'es' ? 'pt' : inputLangKey === 'pt' ? 'es' : null
+  const inTheme  = detectedLang === 'pt' ? BR : detectedLang === 'es' ? ES : null
+  const outTheme = detectedLang === 'pt' ? ES : detectedLang === 'es' ? BR : null
+  const outLang  = detectedLang === 'es' ? 'pt' : detectedLang === 'pt' ? 'es' : null
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>Tradutor ES ↔ PT</h1>
-        <p>Espanhol de Madrid · Português do Brasil</p>
-      </header>
+    <div style={{
+      minHeight: '100vh',
+      background: '#f0f2f5',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      padding: 'env(safe-area-inset-top, 16px) 16px 32px',
+    }}>
+      <div style={{ width: '100%', maxWidth: 500 }}>
 
-      <main className="main">
-
-        <div className="lang-bar">
-          <span className="lang-bar-label">De:</span>
-          {Object.entries(LANGS).map(([code, { flag, label }]) => (
-            <button
-              key={code}
-              className={`lang-pill${forceLang === code ? ' active' : ''}`}
-              onClick={() => handleForce(code)}
-            >
-              <span>{flag}</span> {label}
-            </button>
-          ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '20px 4px 18px' }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: 'linear-gradient(135deg,#009c3b,#aa151b)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 20, boxShadow: '0 2px 8px rgba(0,0,0,.15)'
+          }}>🌐</div>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#111', lineHeight: 1.2 }}>Tradutor</div>
+            <div style={{ fontSize: 12, color: '#999' }}>ES ↔ PT · automático</div>
+          </div>
         </div>
 
-        <div className="card">
-          <div className="card-header">
-            {inputLangKey ? (
-              <span className="card-lang">
-                <span className="card-lang-flag">{LANGS[inputLangKey]?.flag}</span>
-                {LANGS[inputLangKey]?.label}
-                {!forceLang && detectedLang && <span className="detected-badge">detectado</span>}
-              </span>
-            ) : (
-              <span className="card-lang">Digita ou fala...</span>
-            )}
+        <div style={{
+          borderRadius: 18, overflow: 'hidden',
+          boxShadow: inTheme
+            ? `0 2px 16px ${inTheme.solid}30, 0 0 0 2px ${inTheme.border}`
+            : '0 2px 12px rgba(0,0,0,.08), 0 0 0 1.5px #e0e0e0',
+          marginBottom: 12, transition: 'box-shadow .3s'
+        }}>
+          <div style={{
+            padding: '10px 14px',
+            background: inTheme ? inTheme.grad : 'linear-gradient(135deg,#e8e8e8,#d4d4d4)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+          }}>
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '3px 10px', borderRadius: 20,
+              background: inTheme ? inTheme.badge : '#fff',
+              color: inTheme ? inTheme.badgeText : '#888',
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.05em'
+            }}>
+              {inTheme ? `${inTheme.flag} ${detectedLang === 'pt' ? 'PORTUGUÊS' : 'ESPANHOL'}` : '✍️ ENTRADA'}
+            </span>
+            {inTheme && <span style={{ fontSize: 11, color: '#fff', opacity: .8 }}>detectado</span>}
           </div>
-          <div className="card-body">
-            <textarea
-              value={input}
-              onChange={e => handleInput(e.target.value)}
-              placeholder="Fala aí, no idioma que quiser..."
-              rows={5}
-            />
-          </div>
-          <div className="card-footer">
-            <button
-              className={`btn-mic${recording ? ' recording' : ''}`}
-              onClick={recording ? stopRecording : startRecording}
-            >
-              <MicIcon active={recording} />
+
+          <textarea
+            value={input}
+            onChange={e => handleInput(e.target.value)}
+            placeholder="Fala aí, no idioma que quiser..."
+            rows={5}
+            style={{
+              width: '100%', border: 'none', outline: 'none', resize: 'none',
+              fontSize: 17, background: inTheme ? inTheme.light : '#fff',
+              color: '#111', fontFamily: 'inherit', lineHeight: 1.65,
+              padding: '14px 16px', display: 'block', transition: 'background .3s'
+            }}
+          />
+
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '10px 12px',
+            background: inTheme ? inTheme.light : '#f9f9f9',
+            borderTop: `1px solid ${inTheme ? inTheme.border + '22' : '#ececec'}`
+          }}>
+            <button onClick={recording ? stopRecording : startRecording} style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '9px 20px', borderRadius: 12, fontSize: 14,
+              fontWeight: 600, cursor: 'pointer', border: 'none',
+              background: recording ? '#ef4444' : (inTheme ? inTheme.solid : '#555'),
+              color: '#fff', transition: 'all .15s',
+              boxShadow: `0 2px 8px ${recording ? '#ef444440' : (inTheme ? inTheme.solid + '40' : '#55555540')}`
+            }}>
+              <MicIcon active={recording}/>
               {recording ? 'Para aí' : 'Falar'}
             </button>
-            <div className="spacer" />
             {input && (
-              <button className="btn-clear" onClick={() => { setInput(''); clearOutput() }}>
-                <ClearIcon /> Limpar
+              <button onClick={() => { setInput(''); setOutput(''); setDetectedLang(null) }} style={{
+                display: 'flex', alignItems: 'center', gap: 4, fontSize: 13,
+                color: '#aaa', border: 'none', background: 'none', cursor: 'pointer', padding: '6px 8px'
+              }}>
+                <ClearIcon/> Limpar
               </button>
             )}
           </div>
         </div>
 
-        <div className="divider">
-          <ArrowIcon />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 4px 12px' }}>
+          <div style={{ flex: 1, height: 1, background: '#ddd' }}/>
+          <div style={{ fontSize: 16, color: '#ccc' }}>↓</div>
+          <div style={{ flex: 1, height: 1, background: '#ddd' }}/>
         </div>
 
-        <div className="card">
-          <div className="card-header">
-            {targetLangKey ? (
-              <span className="card-lang">
-                <span className="card-lang-flag">{LANGS[targetLangKey].flag}</span>
-                {LANGS[targetLangKey].label}
-              </span>
-            ) : (
-              <span className="card-lang">Tradução</span>
-            )}
+        <div style={{
+          borderRadius: 18, overflow: 'hidden',
+          boxShadow: outTheme
+            ? `0 2px 16px ${outTheme.solid}30, 0 0 0 2px ${outTheme.border}`
+            : '0 2px 12px rgba(0,0,0,.08), 0 0 0 1.5px #e0e0e0',
+          transition: 'box-shadow .3s'
+        }}>
+          <div style={{
+            padding: '10px 14px',
+            background: outTheme ? outTheme.grad : 'linear-gradient(135deg,#e8e8e8,#d4d4d4)',
+            display: 'flex', alignItems: 'center'
+          }}>
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '3px 10px', borderRadius: 20,
+              background: outTheme ? outTheme.badge : '#fff',
+              color: outTheme ? outTheme.badgeText : '#888',
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.05em'
+            }}>
+              {outTheme ? `${outTheme.flag} ${outLang === 'pt' ? 'PORTUGUÊS' : 'ESPANHOL'}` : '🔤 TRADUÇÃO'}
+            </span>
           </div>
-          <div className="card-body">
+
+          <div style={{
+            padding: '14px 16px', minHeight: 100,
+            background: outTheme ? outTheme.light : '#fafafa',
+            transition: 'background .3s'
+          }}>
             {loading ? (
-              <div className="loading-dots">
-                <span /><span /><span />
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', paddingTop: 4 }}>
+                {[0,1,2].map(i => (
+                  <div key={i} style={{
+                    width: 8, height: 8, borderRadius: '50%',
+                    background: outTheme ? outTheme.solid : '#ccc',
+                    animation: `pulse 1.2s ease-in-out ${i * 0.2}s infinite`
+                  }}/>
+                ))}
               </div>
-            ) : output ? (
-              <div className="output-text">{output}</div>
             ) : (
-              <div className="output-placeholder">A tradução vai aparecer aqui...</div>
+              <p style={{ margin: 0, fontSize: 17, color: output ? '#111' : '#ccc', lineHeight: 1.65 }}>
+                {output || 'A tradução aparece aqui...'}
+              </p>
             )}
           </div>
+
           {output && !loading && (
-            <div className="card-footer">
-              <div className="spacer" />
-              <button className={`btn-copy${copied ? ' copied' : ''}`} onClick={copy}>
-                {copied ? <CheckIcon /> : <CopyIcon />}
-                {copied ? 'Copiado!' : 'Copiar'}
+            <div style={{
+              display: 'flex', justifyContent: 'flex-end', padding: '10px 12px',
+              background: outTheme ? outTheme.light : '#fafafa',
+              borderTop: `1px solid ${outTheme ? outTheme.border + '22' : '#ececec'}`
+            }}>
+              <button onClick={copy} style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                fontSize: 13, cursor: 'pointer', padding: '7px 14px',
+                borderRadius: 10, fontWeight: 600, border: 'none',
+                background: copied ? '#dcfce7' : (outTheme ? outTheme.badge : '#eee'),
+                color: copied ? '#16a34a' : (outTheme ? outTheme.badgeText : '#555'),
+                transition: 'all .15s'
+              }}>
+                <CopyIcon done={copied}/> {copied ? 'Copiado!' : 'Copiar'}
               </button>
             </div>
           )}
         </div>
 
-        <div className="footer">Powered by Claude · Anthropic</div>
-      </main>
+      </div>
     </div>
   )
 }
