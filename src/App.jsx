@@ -45,20 +45,29 @@ export default function App() {
   const [detectedLang, setDetectedLang] = useState(null)
   const recognitionRef = useRef(null)
   const debounceRef = useRef(null)
+  const abortRef = useRef(null)
+  const detectedLangRef = useRef(null)
 
   const translate = async (text) => {
-    if (!text.trim()) { setOutput(''); setDetectedLang(null); return }
+    if (!text.trim()) { setOutput(''); setDetectedLang(null); detectedLangRef.current = null; return }
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
     setLoading(true)
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text }),
+        signal: controller.signal
       })
       const parsed = await res.json()
+      if (!res.ok) throw new Error(parsed.error || `HTTP ${res.status}`)
       setOutput(parsed.translation || '')
       setDetectedLang(parsed.detected || null)
-    } catch {
+      detectedLangRef.current = parsed.detected || null
+    } catch (err) {
+      if (err.name === 'AbortError') return
       setOutput('Deu ruim! Verifica a internet e tenta de novo.')
     }
     setLoading(false)
@@ -67,7 +76,7 @@ export default function App() {
   const handleInput = (val) => {
     setInput(val)
     clearTimeout(debounceRef.current)
-    if (!val.trim()) { setOutput(''); setDetectedLang(null); return }
+    if (!val.trim()) { setOutput(''); setDetectedLang(null); detectedLangRef.current = null; return }
     debounceRef.current = setTimeout(() => translate(val), 700)
   }
 
@@ -76,8 +85,13 @@ export default function App() {
     if (!SR) { alert('Tenta no Chrome!'); return }
     const r = new SR()
     r.continuous = false; r.interimResults = false
-    r.lang = detectedLang === 'pt' ? 'pt-BR' : 'es-ES'
-    r.onresult = (e) => { const t = e.results[0][0].transcript; setInput(t); translate(t) }
+    r.lang = detectedLangRef.current === 'pt' ? 'pt-BR' : detectedLangRef.current === 'es' ? 'es-ES' : navigator.language?.startsWith('pt') ? 'pt-BR' : 'es-ES'
+    r.onresult = (e) => {
+      clearTimeout(debounceRef.current)
+      const t = e.results[0][0].transcript
+      setInput(t)
+      translate(t)
+    }
     r.onend = () => setRecording(false)
     r.onerror = () => setRecording(false)
     r.start(); recognitionRef.current = r; setRecording(true)
@@ -85,10 +99,14 @@ export default function App() {
 
   const stopRecording = () => { recognitionRef.current?.stop(); setRecording(false) }
 
-  const copy = () => {
-    navigator.clipboard.writeText(output)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(output)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard unavailable/denied — nothing to recover from here
+    }
   }
 
   const inTheme  = detectedLang === 'pt' ? BR : detectedLang === 'es' ? ES : null
