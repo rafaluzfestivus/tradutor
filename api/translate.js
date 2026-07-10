@@ -1,7 +1,14 @@
 const MAX_TEXT_LENGTH = 5000
+const VALID_LANGS = new Set(['es', 'pt'])
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ANTHROPIC_API_KEY not configured')
+    return res.status(503).json({ error: 'Serviço não configurado. Contate o administrador.' })
+  }
+
   const { text } = req.body || {}
 
   if (typeof text !== 'string' || !text.trim()) {
@@ -21,7 +28,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
+        max_tokens: 4096,
         system: `Você é um tradutor direto entre espanhol e português brasileiro.
 Estilo do espanhol: Madrid do dia a dia — tuteo ("tío", "tía", "mola", "venga", "qué pasa?", "guay", "mogollón"), descontraído, direto. NUNCA use ¡ ou ¿.
 Estilo do português: brasileiro informal — contrações ("tá", "pra", "tô", "tava"), linguagem viva.
@@ -47,12 +54,13 @@ Responda APENAS com JSON: {"translation":"...","detected":"es" ou "pt"}`,
       return res.status(502).json({ error: 'Resposta inesperada do serviço.' })
     }
 
-    if (typeof parsed.translation !== 'string' || !parsed.translation) {
+    if (!parsed || typeof parsed.translation !== 'string' || !parsed.translation) {
       console.error('Bad response shape:', parsed)
       return res.status(502).json({ error: 'Tradução não encontrada.' })
     }
 
-    res.status(200).json({ translation: parsed.translation, detected: parsed.detected || null })
+    const detected = VALID_LANGS.has(parsed.detected) ? parsed.detected : null
+    res.status(200).json({ translation: parsed.translation, detected })
   } catch (err) {
     console.error('Translate error:', err)
     res.status(500).json({ error: 'Deu ruim na tradução.' })

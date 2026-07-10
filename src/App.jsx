@@ -24,10 +24,9 @@ const SpeakIcon = ({ active }) => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
     {active
-      ? <line x1="23" y1="9" x2="17" y2="15"/>
+      ? <><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></>
       : <><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></>
     }
-    {active && <line x1="17" y1="9" x2="23" y2="15"/>}
   </svg>
 )
 
@@ -49,17 +48,25 @@ const ES = {
   text: '#6b0d10', badge: '#f1bf00', badgeText: '#5a3d00', flag: '🇪🇸'
 }
 
+const MIC_ERRORS = {
+  'not-allowed':    'Permissão do microfone negada. Libera nas configurações do navegador.',
+  'no-speech':      'Nenhuma fala detectada. Tente de novo.',
+  'audio-capture':  'Microfone não encontrado ou indisponível.',
+  'network':        'Erro de rede no reconhecimento de voz.',
+}
+
 export default function App() {
-  const [input, setInput]           = useState('')
-  const [output, setOutput]         = useState('')
-  const [loading, setLoading]       = useState(false)
-  const [recording, setRecording]   = useState(false)
-  const [copied, setCopied]         = useState(false)
-  const [speaking, setSpeaking]     = useState(false)
+  const [input, setInput]               = useState('')
+  const [output, setOutput]             = useState('')
+  const [error, setError]               = useState(null)
+  const [loading, setLoading]           = useState(false)
+  const [recording, setRecording]       = useState(false)
+  const [copied, setCopied]             = useState(false)
+  const [speaking, setSpeaking]         = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
-  const recognitionRef = useRef(null)
-  const debounceRef    = useRef(null)
-  const abortRef       = useRef(null)
+  const recognitionRef  = useRef(null)
+  const debounceRef     = useRef(null)
+  const abortRef        = useRef(null)
   const detectedLangRef = useRef(null)
 
   useEffect(() => {
@@ -73,8 +80,10 @@ export default function App() {
   const clearAll = () => {
     clearTimeout(debounceRef.current)
     abortRef.current?.abort()
+    recognitionRef.current?.stop()
     window.speechSynthesis?.cancel()
-    setInput(''); setOutput(''); setDetectedLang(null); setLoading(false); setSpeaking(false)
+    setInput(''); setOutput(''); setError(null)
+    setDetectedLang(null); setLoading(false); setRecording(false); setSpeaking(false)
     detectedLangRef.current = null
   }
 
@@ -84,6 +93,7 @@ export default function App() {
     const controller = new AbortController()
     abortRef.current = controller
     setLoading(true)
+    setError(null)
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
@@ -92,29 +102,31 @@ export default function App() {
         signal: controller.signal
       })
       const parsed = await res.json()
+      if (controller.signal.aborted) return
       if (!res.ok) throw new Error(parsed.error || `HTTP ${res.status}`)
       setOutput(parsed.translation || '')
       setDetectedLang(parsed.detected || null)
       detectedLangRef.current = parsed.detected || null
     } catch (err) {
       if (err.name === 'AbortError') return
-      setOutput('Deu ruim! Verifica a internet e tenta de novo.')
+      setError(err.message || 'Deu ruim! Verifica a internet e tenta de novo.')
     } finally {
       setLoading(false)
     }
   }
 
   const handleInput = (val) => {
-    if (val.length > MAX_CHARS) return
-    setInput(val)
+    const clamped = val.slice(0, MAX_CHARS)
+    setInput(clamped)
     clearTimeout(debounceRef.current)
-    if (!val.trim()) {
+    if (!clamped.trim()) {
       abortRef.current?.abort()
-      setOutput(''); setDetectedLang(null); setLoading(false)
+      window.speechSynthesis?.cancel()
+      setOutput(''); setError(null); setDetectedLang(null); setLoading(false); setSpeaking(false)
       detectedLangRef.current = null
       return
     }
-    debounceRef.current = setTimeout(() => translate(val), 700)
+    debounceRef.current = setTimeout(() => translate(clamped), 700)
   }
 
   const startRecording = () => {
@@ -127,12 +139,15 @@ export default function App() {
            : navigator.language?.startsWith('pt') ? 'pt-BR' : 'es-ES'
     r.onresult = (e) => {
       clearTimeout(debounceRef.current)
-      const t = e.results[0][0].transcript
+      const t = e.results[0][0].transcript.slice(0, MAX_CHARS)
       setInput(t)
       translate(t)
     }
     r.onend   = () => setRecording(false)
-    r.onerror = () => setRecording(false)
+    r.onerror = (e) => {
+      setRecording(false)
+      setError(MIC_ERRORS[e.error] || `Erro no microfone: ${e.error}`)
+    }
     r.start(); recognitionRef.current = r; setRecording(true)
   }
 
@@ -147,21 +162,21 @@ export default function App() {
   }
 
   const speak = () => {
-    if (!window.speechSynthesis) return
+    if (!window.speechSynthesis || !outLang) return
     if (speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return }
     const utter = new SpeechSynthesisUtterance(output)
-    utter.lang = detectedLang === 'pt' ? 'es-ES' : 'pt-BR'
-    utter.onend = () => setSpeaking(false)
+    utter.lang = outLang === 'es' ? 'es-ES' : 'pt-BR'
+    utter.onstart = () => setSpeaking(true)
+    utter.onend   = () => setSpeaking(false)
     utter.onerror = () => setSpeaking(false)
-    window.speechSynthesis.speak(utter)
     setSpeaking(true)
+    window.speechSynthesis.speak(utter)
   }
 
   const inTheme  = detectedLang === 'pt' ? BR : detectedLang === 'es' ? ES : null
   const outTheme = detectedLang === 'pt' ? ES : detectedLang === 'es' ? BR : null
   const outLang  = detectedLang === 'es' ? 'pt' : detectedLang === 'pt' ? 'es' : null
-  const charPct  = input.length / MAX_CHARS
-  const charWarn = charPct > 0.85
+  const charWarn = input.length > MAX_CHARS * 0.85
 
   return (
     <div style={{
@@ -268,6 +283,16 @@ export default function App() {
           <div style={{ flex: 1, height: 1, background: '#ddd' }}/>
         </div>
 
+        {error && (
+          <div style={{
+            padding: '12px 16px', borderRadius: 14, marginBottom: 12,
+            background: '#fef2f2', border: '1.5px solid #fca5a5',
+            fontSize: 14, color: '#b91c1c', lineHeight: 1.5
+          }}>
+            {error}
+          </div>
+        )}
+
         <div style={{
           borderRadius: 18, overflow: 'hidden',
           boxShadow: outTheme
@@ -319,7 +344,7 @@ export default function App() {
               background: outTheme ? outTheme.light : '#fafafa',
               borderTop: `1px solid ${outTheme ? outTheme.border + '22' : '#ececec'}`
             }}>
-              {window.speechSynthesis && (
+              {window.speechSynthesis && outLang && (
                 <button onClick={speak} style={{
                   display: 'flex', alignItems: 'center', gap: 5,
                   fontSize: 13, cursor: 'pointer', padding: '7px 14px',
