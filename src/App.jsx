@@ -1,4 +1,6 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
+
+const MAX_CHARS = 5000
 
 const MicIcon = ({ active }) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill={active ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -15,6 +17,17 @@ const CopyIcon = ({ done }) => (
       ? <polyline points="20 6 9 17 4 12"/>
       : <><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>
     }
+  </svg>
+)
+
+const SpeakIcon = ({ active }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+    {active
+      ? <line x1="23" y1="9" x2="17" y2="15"/>
+      : <><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></>
+    }
+    {active && <line x1="17" y1="9" x2="23" y2="15"/>}
   </svg>
 )
 
@@ -37,19 +50,36 @@ const ES = {
 }
 
 export default function App() {
-  const [input, setInput] = useState('')
-  const [output, setOutput] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [recording, setRecording] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [input, setInput]           = useState('')
+  const [output, setOutput]         = useState('')
+  const [loading, setLoading]       = useState(false)
+  const [recording, setRecording]   = useState(false)
+  const [copied, setCopied]         = useState(false)
+  const [speaking, setSpeaking]     = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
   const recognitionRef = useRef(null)
-  const debounceRef = useRef(null)
-  const abortRef = useRef(null)
+  const debounceRef    = useRef(null)
+  const abortRef       = useRef(null)
   const detectedLangRef = useRef(null)
 
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop()
+      window.speechSynthesis?.cancel()
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  const clearAll = () => {
+    clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    window.speechSynthesis?.cancel()
+    setInput(''); setOutput(''); setDetectedLang(null); setLoading(false); setSpeaking(false)
+    detectedLangRef.current = null
+  }
+
   const translate = async (text) => {
-    if (!text.trim()) { setOutput(''); setDetectedLang(null); detectedLangRef.current = null; return }
+    if (!text.trim()) { clearAll(); return }
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
@@ -69,14 +99,21 @@ export default function App() {
     } catch (err) {
       if (err.name === 'AbortError') return
       setOutput('Deu ruim! Verifica a internet e tenta de novo.')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const handleInput = (val) => {
+    if (val.length > MAX_CHARS) return
     setInput(val)
     clearTimeout(debounceRef.current)
-    if (!val.trim()) { setOutput(''); setDetectedLang(null); detectedLangRef.current = null; return }
+    if (!val.trim()) {
+      abortRef.current?.abort()
+      setOutput(''); setDetectedLang(null); setLoading(false)
+      detectedLangRef.current = null
+      return
+    }
     debounceRef.current = setTimeout(() => translate(val), 700)
   }
 
@@ -85,14 +122,16 @@ export default function App() {
     if (!SR) { alert('Tenta no Chrome!'); return }
     const r = new SR()
     r.continuous = false; r.interimResults = false
-    r.lang = detectedLangRef.current === 'pt' ? 'pt-BR' : detectedLangRef.current === 'es' ? 'es-ES' : navigator.language?.startsWith('pt') ? 'pt-BR' : 'es-ES'
+    r.lang = detectedLangRef.current === 'pt' ? 'pt-BR'
+           : detectedLangRef.current === 'es' ? 'es-ES'
+           : navigator.language?.startsWith('pt') ? 'pt-BR' : 'es-ES'
     r.onresult = (e) => {
       clearTimeout(debounceRef.current)
       const t = e.results[0][0].transcript
       setInput(t)
       translate(t)
     }
-    r.onend = () => setRecording(false)
+    r.onend   = () => setRecording(false)
     r.onerror = () => setRecording(false)
     r.start(); recognitionRef.current = r; setRecording(true)
   }
@@ -104,14 +143,25 @@ export default function App() {
       await navigator.clipboard.writeText(output)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
-    } catch {
-      // clipboard unavailable/denied — nothing to recover from here
-    }
+    } catch { /* permission denied — silently ignore */ }
+  }
+
+  const speak = () => {
+    if (!window.speechSynthesis) return
+    if (speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return }
+    const utter = new SpeechSynthesisUtterance(output)
+    utter.lang = detectedLang === 'pt' ? 'es-ES' : 'pt-BR'
+    utter.onend = () => setSpeaking(false)
+    utter.onerror = () => setSpeaking(false)
+    window.speechSynthesis.speak(utter)
+    setSpeaking(true)
   }
 
   const inTheme  = detectedLang === 'pt' ? BR : detectedLang === 'es' ? ES : null
   const outTheme = detectedLang === 'pt' ? ES : detectedLang === 'es' ? BR : null
   const outLang  = detectedLang === 'es' ? 'pt' : detectedLang === 'pt' ? 'es' : null
+  const charPct  = input.length / MAX_CHARS
+  const charWarn = charPct > 0.85
 
   return (
     <div style={{
@@ -176,7 +226,7 @@ export default function App() {
 
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '10px 12px',
+            padding: '8px 12px 10px',
             background: inTheme ? inTheme.light : '#f9f9f9',
             borderTop: `1px solid ${inTheme ? inTheme.border + '22' : '#ececec'}`
           }}>
@@ -191,14 +241,24 @@ export default function App() {
               <MicIcon active={recording}/>
               {recording ? 'Para aí' : 'Falar'}
             </button>
-            {input && (
-              <button onClick={() => { setInput(''); setOutput(''); setDetectedLang(null) }} style={{
-                display: 'flex', alignItems: 'center', gap: 4, fontSize: 13,
-                color: '#aaa', border: 'none', background: 'none', cursor: 'pointer', padding: '6px 8px'
-              }}>
-                <ClearIcon/> Limpar
-              </button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {input.length > 0 && (
+                <span style={{
+                  fontSize: 11, color: charWarn ? '#e05' : '#bbb',
+                  fontWeight: charWarn ? 600 : 400, transition: 'color .2s'
+                }}>
+                  {input.length}/{MAX_CHARS}
+                </span>
+              )}
+              {input && (
+                <button onClick={clearAll} style={{
+                  display: 'flex', alignItems: 'center', gap: 4, fontSize: 13,
+                  color: '#aaa', border: 'none', background: 'none', cursor: 'pointer', padding: '6px 8px'
+                }}>
+                  <ClearIcon/> Limpar
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -255,10 +315,22 @@ export default function App() {
 
           {output && !loading && (
             <div style={{
-              display: 'flex', justifyContent: 'flex-end', padding: '10px 12px',
+              display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '10px 12px',
               background: outTheme ? outTheme.light : '#fafafa',
               borderTop: `1px solid ${outTheme ? outTheme.border + '22' : '#ececec'}`
             }}>
+              {window.speechSynthesis && (
+                <button onClick={speak} style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  fontSize: 13, cursor: 'pointer', padding: '7px 14px',
+                  borderRadius: 10, fontWeight: 600, border: 'none',
+                  background: speaking ? (outTheme ? outTheme.solid : '#555') : (outTheme ? outTheme.badge + '88' : '#eee'),
+                  color: speaking ? '#fff' : (outTheme ? outTheme.badgeText : '#555'),
+                  transition: 'all .15s'
+                }}>
+                  <SpeakIcon active={speaking}/> {speaking ? 'Parar' : 'Ouvir'}
+                </button>
+              )}
               <button onClick={copy} style={{
                 display: 'flex', alignItems: 'center', gap: 5,
                 fontSize: 13, cursor: 'pointer', padding: '7px 14px',
