@@ -27,7 +27,7 @@ export default async function handler(req, res) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 4096,
         system: `Você é um tradutor direto entre espanhol e português brasileiro.
 Estilo do espanhol: Madrid do dia a dia — tuteo ("tío", "tía", "mola", "venga", "qué pasa?", "guay", "mogollón"), descontraído, direto. NUNCA use ¡ ou ¿.
