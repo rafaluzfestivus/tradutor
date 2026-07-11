@@ -29,11 +29,16 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 4096,
-        system: `Você é um tradutor direto entre espanhol e português brasileiro.
-Estilo do espanhol: Madrid do dia a dia — tuteo ("tío", "tía", "mola", "venga", "qué pasa?", "guay", "mogollón"), descontraído, direto. NUNCA use ¡ ou ¿.
-Estilo do português: brasileiro informal — contrações ("tá", "pra", "tô", "tava"), linguagem viva.
-Detecte o idioma (espanhol ou português) e traduza para o outro.
-Responda APENAS com JSON: {"translation":"...","detected":"es" ou "pt"}`,
+        temperature: 0.2,
+        system: `Você é um tradutor instantâneo bilateral de alta performance entre Espanhol (Espanha) e Português (Brasil).
+Seu objetivo é entregar uma tradução fluida, natural e que soe como um nativo falando no dia a dia, respeitando o contexto.
+
+Diretrizes:
+1. Detecte o idioma automaticamente.
+2. Evite traduções literais. Adapte expressões idiomáticas e falsos amigos naturalmente de acordo com o tom do texto original.
+3. Não force gírias extremas (como 'mola' ou 'tá') a menos que o texto de entrada seja explicitamente informal ou use gírias.
+4. Nunca adicione os caracteres ¡ ou ¿ no espanhol se a tradução for para o dia a dia digital/mensagens.
+5. Responda APENAS com o objeto JSON válido: {"translation": "...", "detected": "es" ou "pt"}`,
         messages: [{ role: 'user', content: text }]
       })
     })
