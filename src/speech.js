@@ -225,7 +225,7 @@ function waitForIce(pc) {
       if (pc.iceGatheringState === 'complete') finish()
     }
     pc.addEventListener('icegatheringstatechange', check)
-    setTimeout(finish, 1500)
+    setTimeout(finish, 4000)
   })
 }
 
@@ -237,7 +237,13 @@ export async function startLiveCall({ targetLanguage, muted, onEvent }) {
   pc.addTrack(stream.getAudioTracks()[0], stream)
   const audio = player('live')
   audio.muted = Boolean(muted)
-  audio.src = ''
+  audio.autoplay = true
+  audio.play().catch(() => {})
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed') {
+      onEvent({ type: 'error', message: 'A conexão de áudio ao vivo caiu.' })
+    }
+  }
   pc.ontrack = (event) => {
     audio.srcObject = event.streams[0]
     audio.play().catch(() => {})
@@ -260,7 +266,7 @@ export async function startLiveCall({ targetLanguage, muted, onEvent }) {
       }),
     })
     const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(data.error || 'Modo ao vivo indisponível.')
+    if (!res.ok) throw new Error([data.error, data.detail].filter(Boolean).join(' ') || 'Modo ao vivo indisponível.')
     await pc.setRemoteDescription({ type: 'answer', sdp: data.answer })
   } catch (error) {
     stream.getTracks().forEach(track => track.stop())

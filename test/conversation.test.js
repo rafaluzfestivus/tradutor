@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, normalizeHistory, parseTranslation, polishTranslation, TRANSLATION_MODEL } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, normalizeHistory, parseTranslation, polishTranslation, readEphemeralToken, TRANSLATION_MODEL } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -119,6 +119,13 @@ test('missing keys degrade without calling the providers', async () => {
     else process.env.OPENAI_API_KEY = openai
     globalThis.fetch = previousFetch
   }
+})
+
+test('ephemeral token is accepted in every documented shape', () => {
+  assert.equal(readEphemeralToken({ value: 'ek_value' }), 'ek_value')
+  assert.equal(readEphemeralToken({ client_secret: 'ek_string' }), 'ek_string')
+  assert.equal(readEphemeralToken({ client_secret: { value: 'ek_nested' } }), 'ek_nested')
+  assert.equal(readEphemeralToken({}), null)
 })
 
 test('live transcript deltas accumulate and a final transcript replaces them', () => {
