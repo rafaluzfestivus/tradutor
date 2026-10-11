@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { MAX_STORED_TURNS, MAX_TEXT_LENGTH, targetLang } from '../lib/conversation.js'
+import { MAX_STORED_TURNS, MAX_TEXT_LENGTH, polishTranslation, targetLang } from '../lib/conversation.js'
 import {
   blobToBase64,
   browserSpeak,
@@ -370,21 +370,22 @@ export default function App() {
     if (event.type === 'error' && event.message) setError(event.message)
     if (event.type === 'caption' || event.type === 'turn') {
       const sourceLang = event.sourceLang === 'es' || event.sourceLang === 'pt' ? event.sourceLang : null
+      const translation = polishTranslation(event.translation || '', sourceLang ? targetLang(sourceLang) : null)
       if (sourceLang) setDetectedLang(sourceLang)
       setInput(event.original || '')
-      setOutput(event.translation || '')
-      if (event.translation) setLivePhase('translating')
-    }
-    if (event.type === 'turn' && (event.original || event.translation) && (event.sourceLang === 'es' || event.sourceLang === 'pt')) {
-      draftRef.current = null
-      rememberTurn({
-        id: uid(),
-        at: Date.now(),
-        speaker: 'live',
-        sourceLang: event.sourceLang,
-        original: event.original || '',
-        translation: event.translation || '',
-      })
+      setOutput(translation)
+      if (translation) setLivePhase('translating')
+      if (event.type === 'turn' && (event.original || translation) && sourceLang) {
+        draftRef.current = null
+        rememberTurn({
+          id: uid(),
+          at: Date.now(),
+          speaker: 'live',
+          sourceLang,
+          original: event.original || '',
+          translation,
+        })
+      }
     }
   }
 
