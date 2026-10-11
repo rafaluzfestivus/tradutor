@@ -5,6 +5,58 @@ html, body, #root {
   background: #f0f2f5;
 }
 
+button, textarea { font-family: inherit; -webkit-tap-highlight-color: transparent; }
+button { touch-action: manipulation; }
+textarea:disabled { opacity: 1; }
+
+.app-shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-scroll {
+  flex: 1;
+  overflow: auto;
+  width: 100%;
+}
+
+.app-column {
+  width: 100%;
+  max-width: 500px;
+  margin: 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.app-footer {
+  position: sticky;
+  bottom: 0;
+  background: rgba(240, 242, 245, .96);
+  border-top: 1px solid #e4e4e4;
+  padding: 10px 0 calc(12px + env(safe-area-inset-bottom));
+  backdrop-filter: blur(8px);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-dot, .app-shell * { animation: none !important; }
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
