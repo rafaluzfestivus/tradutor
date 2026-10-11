@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { applyLiveEvent, MAX_STORED_TURNS, MAX_TEXT_LENGTH, targetLang } from '../lib/conversation.js'
+import { MAX_STORED_TURNS, MAX_TEXT_LENGTH, targetLang } from '../lib/conversation.js'
 import {
   blobToBase64,
   browserSpeak,
@@ -7,8 +7,8 @@ import {
   micErrorMessage,
   playBase64Audio,
   startBrowserRecognition,
-  startLiveCall,
   startRecorder,
+  startTableLive,
   stopPlayback,
   unlockAudio,
 } from './speech.js'
@@ -65,8 +65,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [recordingSide, setRecordingSide] = useState(null)
   const [busySide, setBusySide] = useState(null)
-  const [liveSide, setLiveSide] = useState(null)
   const [liveOn, setLiveOn] = useState(false)
+  const [livePhase, setLivePhase] = useState('')
   const [muted, setMuted] = useState(loadMuted)
   const [speaking, setSpeaking] = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
@@ -79,14 +79,13 @@ export default function App() {
   const mutedRef = useRef(muted)
   const liveOnRef = useRef(false)
   const capsRef = useRef(null)
-  const liveSideRef = useRef(null)
+  const startingLive = useRef(false)
   const abortRef = useRef(null)
   const debounceRef = useRef(null)
   const draftRef = useRef(null)
   const recorderRef = useRef(null)
   const browserRef = useRef(null)
   const liveRef = useRef(null)
-  const liveText = useRef({ input: '', output: '' })
   const genRef = useRef(0)
   const speakGen = useRef(0)
   const clearTimer = useRef(null)
@@ -94,7 +93,6 @@ export default function App() {
 
   historyRef.current = history
   mutedRef.current = muted
-  liveOnRef.current = liveOn
 
   useEffect(() => {
     saveHistory(history)
@@ -282,38 +280,11 @@ export default function App() {
     recorderRef.current = null
     browserRef.current?.stop()
     browserRef.current = null
-    liveRef.current?.stop()
-    liveRef.current = null
-    liveSideRef.current = null
     setRecordingSide(null)
-    setLiveSide(null)
     setSeconds(0)
     if (recorder) {
       try { await recorder.stop() } catch { /* already stopped */ }
     }
-  }
-
-  function storeLiveTurn() {
-    const side = liveSideRef.current
-    const heard = liveText.current.input.trim()
-    const said = liveText.current.output.trim()
-    liveText.current = { input: '', output: '' }
-    if (!side || (!heard && !said)) return
-    const sourceLang = side === 'you' ? 'es' : 'pt'
-    draftRef.current = null
-    rememberTurn({
-      id: uid(),
-      at: Date.now(),
-      speaker: side === 'you' ? 'you' : 'me',
-      sourceLang,
-      original: heard,
-      translation: said,
-    })
-  }
-
-  async function finishLive() {
-    storeLiveTurn()
-    await cancelCapture()
   }
 
   async function runServerRecording(side, sourceLang, generation) {
@@ -394,47 +365,48 @@ export default function App() {
     }
   }
 
-  async function runLive(side, sourceLang, generation) {
-    setLiveSide(side)
-    liveSideRef.current = side
-    liveText.current = { input: '', output: '' }
-    setInput('')
-    setOutput('')
-    setDetectedLang(sourceLang)
-    setError(null)
-    const session = await startLiveCall({
-      targetLanguage: targetLang(sourceLang),
-      muted: mutedRef.current,
-      onEvent: (event) => {
-        if (generation !== genRef.current) return
-        const next = applyLiveEvent(liveText.current, event)
-        liveText.current = { input: next.input, output: next.output }
-        setInput(next.input)
-        setOutput(next.output)
-        if (next.input) setDetectedLang(sourceLang)
-        if (next.error) setError(next.error)
-      },
-    })
-    if (generation !== genRef.current) {
-      session.stop()
-      return
+  function applyTableEvent(event) {
+    if (event.type === 'status' && event.phase) setLivePhase(event.phase)
+    if (event.type === 'error' && event.message) setError(event.message)
+    if (event.type === 'caption' || event.type === 'turn') {
+      const sourceLang = event.sourceLang === 'es' || event.sourceLang === 'pt' ? event.sourceLang : null
+      if (sourceLang) setDetectedLang(sourceLang)
+      setInput(event.original || '')
+      setOutput(event.translation || '')
+      if (event.translation) setLivePhase('translating')
     }
-    liveRef.current = session
+    if (event.type === 'turn' && (event.original || event.translation) && (event.sourceLang === 'es' || event.sourceLang === 'pt')) {
+      draftRef.current = null
+      rememberTurn({
+        id: uid(),
+        at: Date.now(),
+        speaker: 'live',
+        sourceLang: event.sourceLang,
+        original: event.original || '',
+        translation: event.translation || '',
+      })
+    }
+  }
+
+  function stopTableLive() {
+    genRef.current += 1
+    startingLive.current = false
+    liveOnRef.current = false
+    liveRef.current?.stop()
+    liveRef.current = null
+    setLiveOn(false)
+    setLivePhase('')
   }
 
   async function handleMic(side) {
     unlockAudio()
     const sourceLang = side === 'you' ? 'es' : 'pt'
-    if (liveSide === side || recordingSide === side) {
-      if (liveSide === side) await finishLive()
-      else if (recorderRef.current) recorderRef.current.stop()
+    if (recordingSide === side) {
+      if (recorderRef.current) recorderRef.current.stop()
       else browserRef.current?.stop()
       return
     }
-    if (liveSide || recordingSide) {
-      if (liveSide) storeLiveTurn()
-      await cancelCapture()
-    }
+    if (recordingSide) await cancelCapture()
     clearTimeout(debounceRef.current)
     abortRef.current?.abort()
     stopPlayback()
@@ -443,15 +415,6 @@ export default function App() {
     const generation = ++genRef.current
     const available = await ensureCaps()
     try {
-      if (liveOnRef.current) {
-        if (!available.live) {
-          setLiveOn(false)
-          setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
-          return
-        }
-        await runLive(side, sourceLang, generation)
-        return
-      }
       if (available.speech && canRecord()) {
         await runServerRecording(side, sourceLang, generation)
         return
@@ -461,7 +424,6 @@ export default function App() {
       if (generation === genRef.current) {
         setError(micErrorMessage(err))
         setRecordingSide(null)
-        setLiveSide(null)
         setBusySide(null)
         setLoading(false)
       }
@@ -469,19 +431,61 @@ export default function App() {
   }
 
   async function toggleLive() {
-    if (liveOn) {
-      if (liveSideRef.current) await finishLive()
-      setLiveOn(false)
+    unlockAudio()
+    if (liveOnRef.current) {
+      stopTableLive()
+      setInput('')
+      setOutput('')
+      setDetectedLang(null)
       return
     }
+    if (startingLive.current) return
+    startingLive.current = true
+    try {
+      await beginLive()
+    } finally {
+      startingLive.current = false
+    }
+  }
+
+  async function beginLive() {
     const available = await ensureCaps()
     if (!available.live) {
       setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
-      setLiveOn(false)
       return
     }
+    if (recordingSide) await cancelCapture()
+    clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    stopPlayback()
+    setSpeaking(false)
     setError(null)
+    setInput('')
+    setOutput('')
+    setDetectedLang(null)
+    liveOnRef.current = true
     setLiveOn(true)
+    setLivePhase('connecting')
+    const generation = ++genRef.current
+    try {
+      const session = await startTableLive({
+        muted: mutedRef.current,
+        onEvent: (event) => {
+          if (generation !== genRef.current) return
+          applyTableEvent(event)
+        },
+      })
+      if (generation !== genRef.current) {
+        session.stop()
+        return
+      }
+      liveRef.current = session
+    } catch (err) {
+      if (generation === genRef.current) {
+        setError(micErrorMessage(err))
+        stopTableLive()
+      }
+    }
   }
 
   function toggleMute() {
@@ -515,8 +519,12 @@ export default function App() {
   const charWarn = input.length > MAX_TEXT_LENGTH * 0.85
   const captureLabel = recordingSide
     ? `Ouvindo ${recordingSide === 'you' ? 'espanhol' : 'português'} · ${seconds}s`
-    : liveSide
-      ? `Ao vivo · ${liveSide === 'you' ? 'espanhol' : 'português'}`
+    : liveOn
+      ? (livePhase === 'connecting'
+        ? 'Conectando o ao vivo…'
+        : livePhase === 'translating'
+          ? 'Traduzindo nos dois sentidos'
+          : 'Ouvindo os dois')
       : null
 
   return (
@@ -546,9 +554,9 @@ export default function App() {
           }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#222' }}>Ao vivo</div>
-              <div style={{ fontSize: 12, color: '#888', lineHeight: 1.35 }}>Traduz enquanto a pessoa fala</div>
+              <div style={{ fontSize: 12, color: '#888', lineHeight: 1.35 }}>Ouve os dois e traduz sozinho</div>
             </div>
-            <button type="button" role="switch" aria-checked={liveOn} aria-label="Modo ao vivo" onClick={toggleLive} style={{
+            <button type="button" role="switch" aria-checked={liveOn} aria-label="Modo ao vivo" onPointerDown={unlockAudio} onClick={toggleLive} style={{
               width: 52, height: 32, borderRadius: 999, border: 'none', cursor: 'pointer', position: 'relative',
               background: liveOn ? '#009c3b' : '#d0d0d0', transition: 'background .15s', flex: 'none',
             }}>
@@ -561,7 +569,7 @@ export default function App() {
 
           {liveOn && (
             <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#666', lineHeight: 1.45 }}>
-              O modelo ao vivo só roda enquanto um dos botões estiver ligado.
+              Pode deixar o celular na mesa. Ele descobre se a fala foi português ou espanhol e responde no outro idioma.
             </p>
           )}
           {caps && !caps.speech && (
@@ -587,14 +595,14 @@ export default function App() {
           <ExchangeCard
             theme={inTheme}
             label={inTheme ? `${inTheme.flag} ${inTheme.name.toUpperCase()}` : '✍️ ENTRADA'}
-            hint={liveSide ? 'ao vivo' : inTheme ? 'detectado' : null}
+            hint={liveOn ? 'ao vivo' : inTheme ? 'detectado' : null}
           >
             <textarea
               value={input}
               onChange={event => handleInput(event.target.value)}
               placeholder="Ou digite aqui, no idioma que quiser..."
               rows={3}
-              disabled={Boolean(recordingSide || liveSide)}
+              disabled={Boolean(recordingSide || liveOn)}
               aria-label="Texto para traduzir"
               style={{
                 width: '100%', border: 'none', outline: 'none', resize: 'none',
@@ -657,7 +665,7 @@ export default function App() {
                 {history.map(turn => {
                   const from = themeFor(turn.sourceLang)
                   const to = themeFor(targetLang(turn.sourceLang))
-                  const who = turn.speaker === 'you' ? 'Você' : turn.speaker === 'me' ? 'Eu' : 'Digitado'
+                  const who = turn.speaker === 'you' ? 'Você' : turn.speaker === 'me' ? 'Eu' : turn.speaker === 'live' ? (turn.sourceLang === 'es' ? 'Espanhol' : 'Português') : 'Digitado'
                   return (
                     <article key={turn.id} style={{
                       background: '#fff', borderRadius: 14, padding: '10px 12px',
@@ -689,24 +697,33 @@ export default function App() {
       </div>
 
       <div className="app-footer">
-        <div className="app-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <MicButton
-            label="Eu falo"
-            hint="português"
-            theme={BR}
-            active={recordingSide === 'me' || liveSide === 'me'}
-            disabled={Boolean(busySide) || ((recordingSide || liveSide) && recordingSide !== 'me' && liveSide !== 'me')}
-            onClick={() => handleMic('me')}
-          />
-          <MicButton
-            label="Você fala"
-            hint="espanhol"
-            theme={ES}
-            active={recordingSide === 'you' || liveSide === 'you'}
-            disabled={Boolean(busySide) || ((recordingSide || liveSide) && recordingSide !== 'you' && liveSide !== 'you')}
-            onClick={() => handleMic('you')}
-          />
-        </div>
+        {liveOn ? (
+          <div className="app-column" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 64 }}>
+            <span className="rec-dot"/>
+            <span style={{ fontSize: 16, fontWeight: 700, color: '#111' }}>
+              {livePhase === 'connecting' ? 'Conectando…' : 'Ouvindo os dois'}
+            </span>
+          </div>
+        ) : (
+          <div className="app-column" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <MicButton
+              label="Eu falo"
+              hint="português"
+              theme={BR}
+              active={recordingSide === 'me'}
+              disabled={Boolean(busySide) || (recordingSide && recordingSide !== 'me')}
+              onClick={() => handleMic('me')}
+            />
+            <MicButton
+              label="Você fala"
+              hint="espanhol"
+              theme={ES}
+              active={recordingSide === 'you'}
+              disabled={Boolean(busySide) || (recordingSide && recordingSide !== 'you')}
+              onClick={() => handleMic('you')}
+            />
+          </div>
+        )}
       </div>
     </div>
   )

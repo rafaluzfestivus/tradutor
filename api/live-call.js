@@ -1,4 +1,4 @@
-import { LIVE_MODEL, readEphemeralToken, upstreamErrorMessage } from '../lib/conversation.js'
+import { buildLiveSession, readEphemeralToken, upstreamErrorMessage } from '../lib/conversation.js'
 
 const TARGETS = new Set(['es', 'pt'])
 
@@ -25,18 +25,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'OpenAI-Safety-Identifier': 'tradutor-app',
       },
-      body: JSON.stringify({
-        session: {
-          model: LIVE_MODEL,
-          audio: {
-            input: {
-              transcription: { model: 'gpt-realtime-whisper' },
-              noise_reduction: { type: 'near_field' },
-            },
-            output: { language: targetLanguage },
-          },
-        },
-      }),
+      body: JSON.stringify({ session: buildLiveSession(targetLanguage) }),
     })
 
     const secretJson = await secretRes.json().catch(() => ({}))
