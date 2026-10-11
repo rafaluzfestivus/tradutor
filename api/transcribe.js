@@ -1,4 +1,4 @@
-import { MAX_AUDIO_BASE64, TRANSCRIBE_MODEL } from '../lib/conversation.js'
+import { detectSpokenLang, MAX_AUDIO_BASE64, normalizeDetectedLang, TRANSCRIBE_MODEL } from '../lib/conversation.js'
 
 const LANGS = {
   pt: {
@@ -27,8 +27,8 @@ export default async function handler(req, res) {
   }
 
   const { audio, mime, language } = req.body || {}
-  const lang = LANGS[language]
-  if (!lang) return res.status(400).json({ error: 'Idioma do microfone inválido.' })
+  const lang = language ? LANGS[language] : null
+  if (language && !lang) return res.status(400).json({ error: 'Idioma do microfone inválido.' })
   if (typeof audio !== 'string' || !audio) return res.status(400).json({ error: 'Áudio ausente.' })
   if (audio.length > MAX_AUDIO_BASE64) return res.status(413).json({ error: 'Áudio longo demais. Fala em partes menores.' })
 
@@ -43,8 +43,12 @@ export default async function handler(req, res) {
     const form = new FormData()
     form.append('file', new Blob([bytes], { type: cleanMime }), `fala.${extensionFor(cleanMime)}`)
     form.append('model', TRANSCRIBE_MODEL)
-    form.append('languages[]', lang.code)
-    form.append('prompt', lang.prompt)
+    if (lang) {
+      form.append('languages[]', lang.code)
+      form.append('prompt', lang.prompt)
+    } else {
+      form.append('prompt', 'Conversa cotidiana entre português do Brasil e espanhol da Espanha.')
+    }
 
     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -58,7 +62,11 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json()
-    res.status(200).json({ text: typeof data.text === 'string' ? data.text.trim() : '' })
+    const text = typeof data.text === 'string' ? data.text.trim() : ''
+    const detected = lang
+      ? lang.code
+      : (normalizeDetectedLang(data.language) || detectSpokenLang(text))
+    res.status(200).json({ text, language: detected })
   } catch (err) {
     console.error('Transcribe failed:', err?.message || err)
     res.status(500).json({ error: 'Deu ruim ao ouvir o áudio.' })
