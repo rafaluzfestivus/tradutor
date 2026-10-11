@@ -1,4 +1,4 @@
-import { LIVE_MODEL } from '../lib/conversation.js'
+import { LIVE_MODEL, readEphemeralToken, upstreamErrorMessage } from '../lib/conversation.js'
 
 const TARGETS = new Set(['es', 'pt'])
 
@@ -28,16 +28,23 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         session: {
           model: LIVE_MODEL,
-          audio: { output: { language: targetLanguage } },
+          audio: {
+            input: {
+              transcription: { model: 'gpt-realtime-whisper' },
+              noise_reduction: { type: 'near_field' },
+            },
+            output: { language: targetLanguage },
+          },
         },
       }),
     })
 
     const secretJson = await secretRes.json().catch(() => ({}))
-    const token = secretJson.value || secretJson.client_secret?.value
-    if (!secretRes.ok || typeof token !== 'string' || !token) {
-      console.error('Live secret failed:', secretRes.status)
-      return res.status(502).json({ error: 'Não consegui abrir o modo ao vivo.' })
+    const token = readEphemeralToken(secretJson)
+    if (!secretRes.ok || !token) {
+      const detail = upstreamErrorMessage(secretJson, secretRes.status)
+      console.error('Live secret failed:', secretRes.status, detail)
+      return res.status(502).json({ error: 'Não consegui abrir o modo ao vivo.', detail })
     }
 
     const callRes = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
@@ -52,8 +59,14 @@ export default async function handler(req, res) {
 
     const answer = await callRes.text()
     if (!callRes.ok || !answer.includes('v=0')) {
-      console.error('Live call failed:', callRes.status)
-      return res.status(502).json({ error: 'Não consegui conectar o áudio ao vivo.' })
+      let detail = `OpenAI respondeu ${callRes.status}`
+      try {
+        detail = upstreamErrorMessage(JSON.parse(answer), callRes.status)
+      } catch {
+        if (answer && !answer.includes('v=0')) detail = 'A resposta de áudio não veio no formato esperado.'
+      }
+      console.error('Live call failed:', callRes.status, detail)
+      return res.status(502).json({ error: 'Não consegui conectar o áudio ao vivo.', detail })
     }
 
     res.status(200).json({ answer })
