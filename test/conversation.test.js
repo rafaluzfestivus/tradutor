@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, normalizeHistory, parseTranslation, TRANSLATION_MODEL } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, normalizeHistory, parseTranslation, polishTranslation, TRANSLATION_MODEL } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -18,6 +18,11 @@ function mockRes() {
     end() { return this },
   }
 }
+
+test('everyday Spanish drops inverted punctuation and keeps names', () => {
+  assert.equal(polishTranslation('¿Dónde está João?', 'es'), 'Dónde está João?')
+  assert.equal(polishTranslation('não, amanhã', 'pt'), 'não, amanhã')
+})
 
 test('parseTranslation reads fenced and messy JSON', () => {
   assert.deepEqual(parseTranslation('```json\n{"translation":"hola","detected":"pt"}\n```'), {

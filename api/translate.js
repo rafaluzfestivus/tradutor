@@ -1,4 +1,4 @@
-import { buildAnthropicRequest, MAX_TEXT_LENGTH, parseTranslation, targetLang } from '../lib/conversation.js'
+import { buildAnthropicRequest, MAX_TEXT_LENGTH, parseTranslation, polishTranslation, targetLang } from '../lib/conversation.js'
 
 const VALID_LANGS = new Set(['es', 'pt'])
 
@@ -50,10 +50,11 @@ export default async function handler(req, res) {
     }
 
     const detected = sourceLang || (VALID_LANGS.has(parsed.detected) ? parsed.detected : null)
+    const target = targetLang(detected)
     res.status(200).json({
-      translation: parsed.translation.trim(),
+      translation: polishTranslation(parsed.translation, target),
       detected,
-      target: targetLang(detected),
+      target,
     })
   } catch (err) {
     console.error('Translate error:', err?.message || err)
