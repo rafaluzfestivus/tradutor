@@ -12,7 +12,7 @@ import {
   stopPlayback,
   unlockAudio,
 } from './speech.js'
-import { loadHistory, loadMuted, saveHistory, saveMuted } from './storage.js'
+import { loadHistory, saveHistory } from './storage.js'
 
 const BR = {
   grad: 'linear-gradient(135deg,#009c3b,#4dc87a)',
@@ -67,7 +67,6 @@ export default function App() {
   const [busySide, setBusySide] = useState(null)
   const [liveOn, setLiveOn] = useState(false)
   const [livePhase, setLivePhase] = useState('')
-  const [muted, setMuted] = useState(loadMuted)
   const [speaking, setSpeaking] = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
   const [history, setHistory] = useState(loadHistory)
@@ -76,7 +75,6 @@ export default function App() {
   const [confirmClear, setConfirmClear] = useState(false)
 
   const historyRef = useRef(history)
-  const mutedRef = useRef(muted)
   const liveOnRef = useRef(false)
   const capsRef = useRef(null)
   const startingLive = useRef(false)
@@ -92,14 +90,11 @@ export default function App() {
   const historyEndRef = useRef(null)
 
   historyRef.current = history
-  mutedRef.current = muted
 
   useEffect(() => {
     saveHistory(history)
     historyEndRef.current?.scrollIntoView({ block: 'nearest' })
   }, [history])
-
-  useEffect(() => { saveMuted(muted) }, [muted])
 
   useEffect(() => {
     window.speechSynthesis?.getVoices()
@@ -164,32 +159,38 @@ export default function App() {
     })
   }
 
-  async function speakTranslation(text, lang, { force = false } = {}) {
+  async function speakTranslation(text, lang) {
     if (!text || !lang) return
-    if (!force && mutedRef.current) return
     const generation = ++speakGen.current
     stopPlayback()
+    liveRef.current?.setPaused(true)
     setSpeaking(true)
-    const available = capsRef.current || await ensureCaps()
-    let played = false
-    if (available.speech) {
-      try {
-        const res = await fetch('/api/speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, language: lang }),
-        })
-        const data = await res.json().catch(() => ({}))
-        if (generation !== speakGen.current) return
-        if (res.ok && data.audio) played = await playBase64Audio(data.audio, data.mime)
-      } catch {
-        /* phone voice below */
+    try {
+      const available = capsRef.current || await ensureCaps()
+      let played = false
+      if (available.speech) {
+        try {
+          const res = await fetch('/api/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, language: lang }),
+          })
+          const data = await res.json().catch(() => ({}))
+          if (generation !== speakGen.current) return
+          if (res.ok && data.audio) played = await playBase64Audio(data.audio, data.mime)
+        } catch {
+          /* phone voice below */
+        }
+      }
+      if (!played && generation === speakGen.current) {
+        await browserSpeak(text, lang)
+      }
+    } finally {
+      if (generation === speakGen.current) {
+        setSpeaking(false)
+        liveRef.current?.setPaused(false)
       }
     }
-    if (!played && generation === speakGen.current) {
-      await browserSpeak(text, lang)
-    }
-    if (generation === speakGen.current) setSpeaking(false)
   }
 
   async function translateText(text, sourceLang, { fromMic = false } = {}) {
@@ -229,7 +230,6 @@ export default function App() {
           original: trimmed.slice(0, MAX_TEXT_LENGTH),
           translation: data.translation,
         }, fromMic ? null : id)
-        speakTranslation(data.translation, targetLang(detected))
       }
     } catch (err) {
       if (err.name === 'AbortError') return
@@ -470,7 +470,6 @@ export default function App() {
     const generation = ++genRef.current
     try {
       const session = await startTableLive({
-        muted: mutedRef.current,
         onEvent: (event) => {
           if (generation !== genRef.current) return
           applyTableEvent(event)
@@ -487,18 +486,6 @@ export default function App() {
         stopTableLive()
       }
     }
-  }
-
-  function toggleMute() {
-    setMuted(value => {
-      const next = !value
-      if (next) {
-        stopPlayback()
-        setSpeaking(false)
-      }
-      liveRef.current?.setMuted(next)
-      return next
-    })
   }
 
   function askClearHistory() {
@@ -543,9 +530,6 @@ export default function App() {
               <div style={{ fontSize: 18, fontWeight: 700, color: '#111', lineHeight: 1.2 }}>Tradutor</div>
               <div style={{ fontSize: 12, color: '#888' }}>Brasil ↔ Espanha</div>
             </div>
-            <button type="button" onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'Ligar o som' : 'Silenciar a voz automática'} style={iconButton(muted)}>
-              <SpeakerIcon muted={muted}/> {muted ? 'Mudo' : 'Som'}
-            </button>
           </header>
 
           <div style={{
@@ -555,7 +539,7 @@ export default function App() {
           }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#222' }}>Ao vivo</div>
-              <div style={{ fontSize: 12, color: '#888', lineHeight: 1.35 }}>Ouve os dois e traduz sozinho</div>
+              <div style={{ fontSize: 12, color: '#888', lineHeight: 1.35 }}>Ouve os dois e escreve a tradução</div>
             </div>
             <button type="button" role="switch" aria-checked={liveOn} aria-label="Modo ao vivo" onPointerDown={unlockAudio} onClick={toggleLive} style={{
               width: 52, height: 32, borderRadius: 999, border: 'none', cursor: 'pointer', position: 'relative',
@@ -570,7 +554,7 @@ export default function App() {
 
           {liveOn && (
             <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#666', lineHeight: 1.45 }}>
-              Pode deixar o celular na mesa. Ele descobre se a fala foi português ou espanhol e responde no outro idioma.
+              Pode deixar o celular na mesa. A tradução aparece escrita. Toque em Ouvir para escutar.
             </p>
           )}
           {caps && !caps.speech && (
@@ -634,14 +618,14 @@ export default function App() {
             <div style={{ padding: '12px 14px', minHeight: 72 }}>
               {loading ? <Dots color={outTheme?.solid}/> : (
                 <p style={{ margin: 0, fontSize: 17, color: output ? '#111' : '#bbb', lineHeight: 1.55 }}>
-                  {output || 'A tradução aparece aqui e sai falada.'}
+                  {output || 'A tradução aparece aqui. Toque em Ouvir para escutar.'}
                 </p>
               )}
             </div>
             {output && !loading && (
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '0 10px 10px' }}>
-                <button type="button" onClick={() => speakTranslation(output, outLang, { force: true })} style={pill(outTheme, speaking)}>
-                  <SpeakerIcon muted={false}/> {speaking ? 'Falando' : 'Ouvir de novo'}
+                <button type="button" onClick={() => speakTranslation(output, outLang)} style={pill(outTheme, speaking)}>
+                  <SpeakerIcon muted={false}/> {speaking ? 'Falando' : 'Ouvir'}
                 </button>
                 <CopyButton text={output} theme={outTheme}/>
               </div>
@@ -683,7 +667,7 @@ export default function App() {
                         {to?.flag} {turn.translation}
                       </p>
                       {turn.translation && (
-                        <button type="button" onClick={() => speakTranslation(turn.translation, targetLang(turn.sourceLang), { force: true })} style={{ ...textButton, marginTop: 6 }}>
+                        <button type="button" onClick={() => speakTranslation(turn.translation, targetLang(turn.sourceLang))} style={{ ...textButton, marginTop: 6 }}>
                           Ouvir
                         </button>
                       )}
@@ -814,16 +798,6 @@ function Dots({ color }) {
 
 const textButton = {
   fontSize: 13, color: '#888', border: 'none', background: 'none', cursor: 'pointer', padding: '6px 4px',
-}
-
-function iconButton(active) {
-  return {
-    display: 'inline-flex', alignItems: 'center', gap: 5, flex: 'none',
-    borderRadius: 999, border: 'none', cursor: 'pointer',
-    padding: '8px 12px', fontSize: 13, fontWeight: 700,
-    background: active ? '#111' : '#fff', color: active ? '#fff' : '#333',
-    boxShadow: '0 1px 4px rgba(0,0,0,.08)',
-  }
 }
 
 function pill(theme, speaking, copied) {
