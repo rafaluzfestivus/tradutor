@@ -1,7 +1,6 @@
 import { isStoredTurn, MAX_STORED_TURNS } from '../lib/conversation.js'
 
 const HISTORY_KEY = 'tradutor.history.v1'
-const MUTE_KEY = 'tradutor.muted.v1'
 
 export function loadHistory() {
   try {
@@ -21,10 +20,3 @@ export function saveHistory(turns) {
   }
 }
 
-export function loadMuted() {
-  try { return localStorage.getItem(MUTE_KEY) === '1' } catch { return false }
-}
-
-export function saveMuted(muted) {
-  try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0') } catch { /* ignore */ }
-}

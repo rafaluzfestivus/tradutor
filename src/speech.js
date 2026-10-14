@@ -1,3 +1,5 @@
+import { detectSpokenLang } from '../lib/conversation.js'
+
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA='
 
 let currentAudio = null
@@ -5,23 +7,17 @@ let currentUrl = null
 let settlePlayback = null
 let audioContext = null
 let sharedAudio = null
-let liveAudio = null
 
-function player(kind) {
-  if (kind === 'live') {
-    if (!liveAudio) {
-      liveAudio = new Audio()
-      liveAudio.autoplay = true
-      liveAudio.playsInline = true
-      liveAudio.setAttribute('playsinline', 'true')
-    }
-    return liveAudio
-  }
-  if (!sharedAudio) {
-    sharedAudio = new Audio()
-    sharedAudio.setAttribute('playsinline', 'true')
-    sharedAudio.playsInline = true
-  }
+function makeAudio() {
+  const audio = new Audio()
+  audio.autoplay = true
+  audio.playsInline = true
+  audio.setAttribute('playsinline', 'true')
+  return audio
+}
+
+function player() {
+  if (!sharedAudio) sharedAudio = makeAudio()
   return sharedAudio
 }
 
@@ -29,10 +25,9 @@ export function unlockAudio() {
   const Ctx = window.AudioContext || window.webkitAudioContext
   if (Ctx && !audioContext) audioContext = new Ctx()
   audioContext?.resume?.().catch(() => {})
-  for (const audio of [player('speech'), player('live')]) {
-    audio.src = SILENT_WAV
-    audio.play().catch(() => {})
-  }
+  const audio = player()
+  audio.src = SILENT_WAV
+  audio.play().catch(() => {})
 }
 
 export function stopPlayback() {
@@ -59,7 +54,7 @@ export function playBase64Audio(base64, mime) {
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
   const url = URL.createObjectURL(new Blob([bytes], { type: mime || 'audio/mpeg' }))
-  const audio = player('speech')
+  const audio = player()
   audio.src = url
   currentAudio = audio
   currentUrl = url
@@ -214,69 +209,177 @@ export function startBrowserRecognition(sourceLang) {
   }
 }
 
-function waitForIce(pc) {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve()
-  return new Promise((resolve) => {
-    const finish = () => {
-      pc.removeEventListener('icegatheringstatechange', check)
-      resolve()
-    }
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') finish()
-    }
-    pc.addEventListener('icegatheringstatechange', check)
-    setTimeout(finish, 1500)
-  })
+function outputRms(analyser) {
+  const data = new Uint8Array(analyser.fftSize)
+  analyser.getByteTimeDomainData(data)
+  let sum = 0
+  for (let i = 0; i < data.length; i += 1) {
+    const sample = (data[i] - 128) / 128
+    sum += sample * sample
+  }
+  return Math.sqrt(sum / data.length)
 }
 
-export async function startLiveCall({ targetLanguage, muted, onEvent }) {
+async function startUtteranceLive({ onEvent }) {
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   })
-  const pc = new RTCPeerConnection()
-  pc.addTrack(stream.getAudioTracks()[0], stream)
-  const audio = player('live')
-  audio.muted = Boolean(muted)
-  audio.src = ''
-  pc.ontrack = (event) => {
-    audio.srcObject = event.streams[0]
-    audio.play().catch(() => {})
-  }
-  const channel = pc.createDataChannel('oai-events')
-  channel.onmessage = (event) => {
-    try { onEvent(JSON.parse(event.data)) } catch { /* ignore */ }
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (Ctx && !audioContext) audioContext = new Ctx()
+  await audioContext?.resume?.().catch(() => {})
+  const source = audioContext.createMediaStreamSource(stream)
+  const analyser = audioContext.createAnalyser()
+  analyser.fftSize = 2048
+  const silent = audioContext.createGain()
+  silent.gain.value = 0
+  source.connect(analyser)
+  analyser.connect(silent)
+  silent.connect(audioContext.destination)
+
+  let stopped = false
+  let paused = false
+  let mode = 'listen'
+  let voiceSince = 0
+  let quietSince = 0
+  let recorder = null
+  const chunks = []
+
+  const arm = () => {
+    if (stopped) return
+    mode = 'listen'
+    voiceSince = 0
+    quietSince = 0
+    onEvent({ type: 'status', phase: 'listening' })
   }
 
-  try {
-    const offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-    await waitForIce(pc)
-    const res = await fetch('/api/live-call', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        targetLanguage,
-        sdp: pc.localDescription?.sdp || offer.sdp,
-      }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(data.error || 'Modo ao vivo indisponível.')
-    await pc.setRemoteDescription({ type: 'answer', sdp: data.answer })
-  } catch (error) {
-    stream.getTracks().forEach(track => track.stop())
-    pc.close()
-    throw error
+  const discardRecording = () => {
+    const rec = recorder
+    recorder = null
+    chunks.splice(0)
+    mode = 'listen'
+    voiceSince = 0
+    quietSince = 0
+    if (!rec || rec.state === 'inactive') return
+    rec.ondataavailable = null
+    rec.onstop = null
+    try { rec.stop() } catch { /* already stopped */ }
   }
+
+  const finishUtterance = async () => {
+    const rec = recorder
+    recorder = null
+    if (!rec || rec.state === 'inactive') {
+      arm()
+      return
+    }
+    const blob = await new Promise(resolve => {
+      rec.onstop = () => resolve(new Blob(chunks.splice(0), { type: rec.mimeType || 'audio/webm' }))
+      try { rec.stop() } catch { resolve(new Blob()) }
+    })
+    if (stopped) return
+    if (blob.size < 200) {
+      arm()
+      return
+    }
+    onEvent({ type: 'status', phase: 'translating' })
+    try {
+      const audio = await blobToBase64(blob)
+      const heardRes = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio, mime: blob.type }),
+      })
+      const heard = await heardRes.json().catch(() => ({}))
+      if (!heardRes.ok) throw new Error(heard.error || 'Não consegui entender o áudio.')
+      const original = (heard.text || '').trim()
+      const sourceLang = heard.language || detectSpokenLang(original)
+      if (!original || !sourceLang) {
+        arm()
+        return
+      }
+      onEvent({ type: 'caption', sourceLang, original, translation: '' })
+      const translatedRes = await fetch('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: original, sourceLang }),
+      })
+      const translated = await translatedRes.json().catch(() => ({}))
+      if (!translatedRes.ok) throw new Error(translated.error || 'Deu ruim na tradução.')
+      const translation = (translated.translation || '').trim()
+      const detected = translated.detected || sourceLang
+      onEvent({ type: 'caption', sourceLang: detected, original, translation })
+      onEvent({ type: 'turn', sourceLang: detected, original, translation })
+    } catch (error) {
+      if (!stopped) onEvent({ type: 'error', message: error?.message || 'Deu ruim no modo ao vivo.' })
+    } finally {
+      if (!stopped) arm()
+    }
+  }
+
+  const begin = () => {
+    chunks.splice(0)
+    const mime = pickRecorderMime()
+    try {
+      recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined)
+    } catch {
+      recorder = new MediaRecorder(stream)
+    }
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size) chunks.push(event.data)
+    }
+    try { recorder.start(250) } catch { recorder.start() }
+    mode = 'record'
+    onEvent({ type: 'status', phase: 'listening' })
+  }
+
+  const timer = setInterval(() => {
+    if (stopped || mode === 'busy' || paused) return
+    const loud = outputRms(analyser) > 0.03
+    const now = Date.now()
+    if (mode === 'listen' && loud) {
+      voiceSince = now
+      quietSince = 0
+      begin()
+      return
+    }
+    if (mode !== 'record') return
+    if (loud) {
+      quietSince = 0
+      if (now - voiceSince > 20000) {
+        mode = 'busy'
+        finishUtterance()
+      }
+      return
+    }
+    if (!quietSince) quietSince = now
+    if (now - voiceSince > 350 && now - quietSince > 650) {
+      mode = 'busy'
+      finishUtterance()
+    }
+  }, 100)
+
+  onEvent({ type: 'engine', engine: 'turns' })
+  onEvent({ type: 'status', phase: 'listening' })
 
   return {
-    setMuted(value) { audio.muted = Boolean(value) },
+    setPaused(value) {
+      paused = Boolean(value)
+      if (paused) discardRecording()
+    },
     stop() {
-      try { channel.close() } catch { /* already closed */ }
-      pc.close()
+      stopped = true
+      clearInterval(timer)
+      discardRecording()
       stream.getTracks().forEach(track => track.stop())
-      audio.srcObject = null
+      try { source.disconnect() } catch { /* already disconnected */ }
     },
   }
+}
+
+export async function startTableLive({ onEvent }) {
+  unlockAudio()
+  onEvent({ type: 'status', phase: 'listening' })
+  return startUtteranceLive({ onEvent })
 }
 
 export function micErrorMessage(error) {

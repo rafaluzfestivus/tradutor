@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, normalizeHistory, parseTranslation, polishTranslation, TRANSLATION_MODEL } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, chooseLiveTarget, detectSpokenLang, emptyLiveBuffers, liveDirectionTarget, normalizeHistory, parseTranslation, polishTranslation, readEphemeralToken, TRANSLATION_MODEL } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -121,6 +121,13 @@ test('missing keys degrade without calling the providers', async () => {
   }
 })
 
+test('ephemeral token is accepted in every documented shape', () => {
+  assert.equal(readEphemeralToken({ value: 'ek_value' }), 'ek_value')
+  assert.equal(readEphemeralToken({ client_secret: 'ek_string' }), 'ek_string')
+  assert.equal(readEphemeralToken({ client_secret: { value: 'ek_nested' } }), 'ek_nested')
+  assert.equal(readEphemeralToken({}), null)
+})
+
 test('live transcript deltas accumulate and a final transcript replaces them', () => {
   let state = applyLiveEvent({ input: '', output: '' }, { type: 'session.input_transcript.delta', delta: 'olá' })
   state = applyLiveEvent(state, { type: 'session.output_transcript.delta', delta: 'hola' })
@@ -128,6 +135,39 @@ test('live transcript deltas accumulate and a final transcript replaces them', (
   assert.equal(state.output, 'hola')
   state = applyLiveEvent(state, { type: 'session.input_transcript.done', transcript: 'olá, tudo bem?' })
   assert.equal(state.input, 'olá, tudo bem?')
+})
+
+test('spoken language detects Portuguese and Spanish without a fixed direction', () => {
+  assert.equal(detectSpokenLang('Olá, bom dia. Onde está o João?'), 'pt')
+  assert.equal(detectSpokenLang('cadê ele?'), 'pt')
+  assert.equal(detectSpokenLang('não, amanhã'), 'pt')
+  assert.equal(detectSpokenLang('sim'), 'pt')
+  assert.equal(detectSpokenLang('Hola, buenos días. Dónde está João?'), 'es')
+  assert.equal(detectSpokenLang('gracias'), 'es')
+  assert.equal(detectSpokenLang('no, mañana'), 'es')
+  assert.equal(detectSpokenLang('sí'), 'es')
+  assert.equal(detectSpokenLang('ok'), null)
+})
+
+test('live direction follows whichever language was just spoken', () => {
+  const buffers = emptyLiveBuffers()
+  buffers.es.input = 'Olá, bom dia. Onde está o João?'
+  buffers.pt.input = 'Olá, bom dia. Onde está o João?'
+  assert.equal(chooseLiveTarget(buffers), 'es')
+  assert.equal(liveDirectionTarget(buffers, null), 'es')
+  assert.equal(liveDirectionTarget(buffers, 'es'), 'es')
+  buffers.es.input = 'Hola, buenos días. Dónde está João?'
+  buffers.pt.input = 'Hola, buenos días. Dónde está João?'
+  assert.equal(liveDirectionTarget(buffers, 'es'), 'pt')
+})
+
+test('live session is one output language at a time, for a table mic', () => {
+  const session = buildLiveSession('pt')
+  assert.equal(session.model, 'gpt-realtime-translate')
+  assert.equal(session.audio.output.language, 'pt')
+  assert.equal(session.audio.input.transcription.model, 'gpt-realtime-whisper')
+  assert.equal(session.audio.input.noise_reduction.type, 'far_field')
+  assert.equal(buildLiveSession('es').audio.output.language, 'es')
 })
 
 test('live call rejects a bad language before using the key', async () => {
@@ -141,6 +181,65 @@ test('live call rejects a bad language before using the key', async () => {
     await liveCall({ method: 'POST', body: { targetLanguage: 'fr', sdp: 'v=0\r\n' } }, res)
     assert.equal(res.statusCode, 400)
     assert.equal(called, false)
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('live call asks OpenAI for the chosen output language only', async () => {
+  const previous = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'test-key'
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), body: options.body })
+    if (String(url).includes('client_secrets')) {
+      return { ok: true, json: async () => ({ value: 'ek_test' }) }
+    }
+    return { ok: true, text: async () => 'v=0\r\n' }
+  }
+  try {
+    const res = mockRes()
+    const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n'
+    await liveCall({ method: 'POST', body: { targetLanguage: 'pt', sdp } }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.answer, 'v=0\r\n')
+    const secret = JSON.parse(calls[0].body)
+    assert.equal(secret.session.audio.output.language, 'pt')
+    assert.equal(secret.session.audio.input.noise_reduction.type, 'far_field')
+    assert.match(calls[1].url, /\/realtime\/translations\/calls$/)
+    assert.equal(calls[1].body, sdp)
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('transcribe can detect the language when the mic is shared', async () => {
+  const previous = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'test-key'
+  const previousFetch = globalThis.fetch
+  const bodies = []
+  globalThis.fetch = async (_url, options) => {
+    bodies.push(options.body)
+    return { ok: true, json: async () => ({ text: 'hola, buenos días', language: 'spanish' }) }
+  }
+  try {
+    const forced = mockRes()
+    await transcribe({ method: 'POST', body: { audio: 'YQ==', mime: 'audio/webm', language: 'pt' } }, forced)
+    assert.equal(forced.statusCode, 200)
+    assert.equal(forced.body.language, 'pt')
+    assert.equal(bodies[0].get('languages[]'), 'pt')
+
+    const open = mockRes()
+    await transcribe({ method: 'POST', body: { audio: 'YQ==', mime: 'audio/wav' } }, open)
+    assert.equal(open.statusCode, 200)
+    assert.equal(open.body.text, 'hola, buenos días')
+    assert.equal(open.body.language, 'es')
+    assert.equal(bodies[1].get('languages[]'), null)
   } finally {
     if (previous === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previous
