@@ -1,4 +1,4 @@
-import { detectSpokenLang, MAX_AUDIO_BASE64, normalizeDetectedLang, TRANSCRIBE_MODEL } from '../lib/conversation.js'
+import { languageFromTranscript, MAX_AUDIO_BASE64, TRANSCRIBE_MODEL } from '../lib/conversation.js'
 
 const LANGS = {
   pt: {
@@ -63,9 +63,7 @@ export default async function handler(req, res) {
 
     const data = await response.json()
     const text = typeof data.text === 'string' ? data.text.trim() : ''
-    const detected = lang
-      ? lang.code
-      : (normalizeDetectedLang(data.language) || detectSpokenLang(text))
+    const detected = lang ? lang.code : languageFromTranscript(data, text)
     res.status(200).json({ text, language: detected })
   } catch (err) {
     console.error('Transcribe failed:', err?.message || err)

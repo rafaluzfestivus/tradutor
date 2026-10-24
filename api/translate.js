@@ -32,7 +32,6 @@ export default async function handler(req, res) {
       body: JSON.stringify(buildAnthropicRequest({
         text: text.trim(),
         sourceLang,
-        history: body.history,
       })),
     })
 

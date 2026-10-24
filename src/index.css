@@ -38,13 +38,6 @@ textarea:disabled { opacity: 1; }
   backdrop-filter: blur(8px);
 }
 
-.history-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-bottom: 8px;
-}
-
 .rec-dot {
   width: 8px;
   height: 8px;
