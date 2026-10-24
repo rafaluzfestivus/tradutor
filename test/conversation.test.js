@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, chooseLiveTarget, detectSpokenLang, emptyLiveBuffers, liveDirectionTarget, normalizeHistory, parseTranslation, polishTranslation, readEphemeralToken, TRANSLATION_MODEL } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, chooseLiveTarget, createEndpoint, detectSpokenLang, emptyLiveBuffers, languageFromTranscript, liveDirectionTarget, parseTranslation, polishTranslation, readEphemeralToken, stepEndpoint, TRANSLATION_MODEL, UTTERANCE_LIMIT_MS } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -33,23 +33,22 @@ test('parseTranslation reads fenced and messy JSON', () => {
   assert.equal(parseTranslation('sem json'), null)
 })
 
-test('history context is capped and the model request stays on Haiku 5.5', () => {
-  const history = Array.from({ length: 8 }, (_, i) => ({
-    sourceLang: i % 2 ? 'es' : 'pt',
-    original: 'frase ' + i,
-    translation: 'frase traduzida ' + i,
-  }))
-  const request = buildAnthropicRequest({ text: 'sim', sourceLang: 'pt', history })
+test('each translation is independent and stays on Haiku 5.5', () => {
+  const request = buildAnthropicRequest({
+    text: 'sim',
+    sourceLang: 'pt',
+    history: [{ original: 'frase antiga', translation: 'frase vieja' }],
+  })
   assert.equal(request.model, TRANSLATION_MODEL)
   assert.equal(request.temperature, undefined)
   assert.equal(request.top_p, undefined)
   assert.equal(request.thinking.type, 'disabled')
   assert.equal(request.output_config.effort, 'low')
-  assert.equal(normalizeHistory(history).length, 6)
-  assert.match(request.messages[0].content, /frase 7/)
-  assert.doesNotMatch(request.messages[0].content, /frase 0/)
   assert.match(request.messages[0].content, /Idioma de origem: pt/)
   assert.match(request.messages[0].content, /sim/)
+  assert.doesNotMatch(request.messages[0].content, /frase antiga/)
+  assert.doesNotMatch(request.messages[0].content, /frase vieja/)
+  assert.doesNotMatch(request.messages[0].content, /Contexto/)
 })
 
 test('translate handler calls Haiku and forces the mic language', async () => {
@@ -76,7 +75,8 @@ test('translate handler calls Haiku and forces the mic language', async () => {
     assert.equal(res.body.target, 'es')
     assert.equal(sent.model, 'claude-haiku-5-5')
     assert.equal('temperature' in sent, false)
-    assert.match(sent.messages[0].content, /e ele\?/)
+    assert.match(sent.messages[0].content, /oi/)
+    assert.doesNotMatch(sent.messages[0].content, /e ele/)
   } finally {
     process.env.ANTHROPIC_API_KEY = previous
     globalThis.fetch = previousFetch
@@ -240,9 +240,61 @@ test('transcribe can detect the language when the mic is shared', async () => {
     assert.equal(open.body.text, 'hola, buenos días')
     assert.equal(open.body.language, 'es')
     assert.equal(bodies[1].get('languages[]'), null)
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ text: 'ok', languages: [{ code: 'es' }] }),
+    })
+    const listed = mockRes()
+    await transcribe({ method: 'POST', body: { audio: 'YQ==', mime: 'audio/mp4' } }, listed)
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.body.language, 'es')
+    assert.equal(languageFromTranscript({ text: 'ok' }, 'ok'), null)
   } finally {
     if (previous === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previous
     globalThis.fetch = previousFetch
   }
+})
+
+function runEndpoint(levels) {
+  let state = createEndpoint(0)
+  const actions = []
+  for (const [time, level] of levels) {
+    const step = stepEndpoint(state, level, time)
+    state = step.state
+    if (step.action) actions.push({ action: step.action, time })
+  }
+  return { state, actions }
+}
+
+test('live mode starts on speech and ends on a short pause', () => {
+  const quiet = []
+  for (let time = 0; time <= 500; time += 80) quiet.push([time, 0.004])
+  for (let time = 580; time <= 1100; time += 80) quiet.push([time, 0.08])
+  quiet.push([1180, 0.03])
+  for (let time = 1260; time <= 2000; time += 80) quiet.push([time, 0.004])
+  const { actions } = runEndpoint(quiet)
+  assert.equal(actions[0]?.action, 'start')
+  assert.ok(actions[0].time < 1000)
+  assert.equal(actions.at(-1)?.action, 'stop')
+  assert.ok(actions.at(-1).time - actions[0].time < 2000)
+})
+
+test('room noise alone does not open a live utterance', () => {
+  const noise = []
+  for (let time = 0; time <= 3000; time += 80) noise.push([time, 0.03])
+  const { actions } = runEndpoint(noise)
+  assert.deepEqual(actions, [])
+})
+
+test('continuous speech is cut well before the old twenty second wait', () => {
+  const speech = []
+  for (let time = 0; time <= 400; time += 80) speech.push([time, 0.005])
+  for (let time = 480; time <= 480 + UTTERANCE_LIMIT_MS + 600; time += 100) speech.push([time, 0.1])
+  const { actions } = runEndpoint(speech)
+  assert.equal(actions[0]?.action, 'start')
+  assert.equal(actions[1]?.action, 'stop')
+  assert.ok(actions[1].time - actions[0].time <= UTTERANCE_LIMIT_MS + 150)
+  assert.ok(actions[1].time < 20000)
 })

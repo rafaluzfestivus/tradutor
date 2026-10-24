@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { MAX_STORED_TURNS, MAX_TEXT_LENGTH, polishTranslation, targetLang } from '../lib/conversation.js'
+import { MAX_TEXT_LENGTH, polishTranslation, targetLang } from '../lib/conversation.js'
 import {
   blobToBase64,
   browserSpeak,
   canRecord,
   micErrorMessage,
+  openMic,
   playBase64Audio,
   startBrowserRecognition,
   startRecorder,
@@ -12,7 +13,6 @@ import {
   stopPlayback,
   unlockAudio,
 } from './speech.js'
-import { loadHistory, saveHistory } from './storage.js'
 
 const BR = {
   grad: 'linear-gradient(135deg,#009c3b,#4dc87a)',
@@ -26,19 +26,6 @@ const ES = {
 }
 
 const themeFor = (lang) => (lang === 'pt' ? BR : lang === 'es' ? ES : null)
-
-function uid() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function clock(at) {
-  try {
-    return new Date(at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return ''
-  }
-}
 
 const MicIcon = ({ active }) => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill={active ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -69,34 +56,28 @@ export default function App() {
   const [livePhase, setLivePhase] = useState('')
   const [speaking, setSpeaking] = useState(false)
   const [detectedLang, setDetectedLang] = useState(null)
-  const [history, setHistory] = useState(loadHistory)
   const [caps, setCaps] = useState(null)
   const [seconds, setSeconds] = useState(0)
-  const [confirmClear, setConfirmClear] = useState(false)
 
-  const historyRef = useRef(history)
   const liveOnRef = useRef(false)
   const capsRef = useRef(null)
   const startingLive = useRef(false)
   const abortRef = useRef(null)
   const debounceRef = useRef(null)
-  const draftRef = useRef(null)
   const recorderRef = useRef(null)
   const browserRef = useRef(null)
   const liveRef = useRef(null)
   const genRef = useRef(0)
   const speakGen = useRef(0)
-  const clearTimer = useRef(null)
-  const historyEndRef = useRef(null)
-
-  historyRef.current = history
+  const outputRef = useRef(null)
 
   useEffect(() => {
-    saveHistory(history)
-    historyEndRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [history])
+    if (!output) return
+    outputRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [output])
 
   useEffect(() => {
+    try { localStorage.removeItem('tradutor.history.v1') } catch { /* private mode */ }
     window.speechSynthesis?.getVoices()
     const onVoices = () => window.speechSynthesis?.getVoices()
     window.speechSynthesis?.addEventListener?.('voiceschanged', onVoices)
@@ -114,7 +95,6 @@ export default function App() {
       window.speechSynthesis?.removeEventListener?.('voiceschanged', onVoices)
       genRef.current += 1
       clearTimeout(debounceRef.current)
-      clearTimeout(clearTimer.current)
       abortRef.current?.abort()
       recorderRef.current?.stop()
       browserRef.current?.stop()
@@ -136,27 +116,6 @@ export default function App() {
       setCaps(fallback)
       return fallback
     }
-  }
-
-  function dropDraft() {
-    const id = draftRef.current
-    draftRef.current = null
-    if (!id) return
-    setHistory(prev => prev.filter(item => item.id !== id))
-  }
-
-  function rememberTurn(turn, replaceId) {
-    setHistory(prev => {
-      if (replaceId) {
-        const index = prev.findIndex(item => item.id === replaceId)
-        if (index >= 0) {
-          const next = prev.slice()
-          next[index] = turn
-          return next
-        }
-      }
-      return [...prev, turn].slice(-MAX_STORED_TURNS)
-    })
   }
 
   async function speakTranslation(text, lang) {
@@ -193,7 +152,7 @@ export default function App() {
     }
   }
 
-  async function translateText(text, sourceLang, { fromMic = false } = {}) {
+  async function translateText(text, sourceLang) {
     const trimmed = text.trim()
     if (!trimmed) return
     abortRef.current?.abort()
@@ -201,15 +160,14 @@ export default function App() {
     abortRef.current = controller
     setLoading(true)
     setError(null)
-    const prior = historyRef.current
-      .filter(item => item.id !== draftRef.current)
-      .slice(-6)
-      .map(item => ({ sourceLang: item.sourceLang, original: item.original, translation: item.translation }))
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: trimmed.slice(0, MAX_TEXT_LENGTH), sourceLang, history: prior }),
+        body: JSON.stringify({
+          text: trimmed.slice(0, MAX_TEXT_LENGTH),
+          ...(sourceLang ? { sourceLang } : {}),
+        }),
         signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
@@ -218,19 +176,6 @@ export default function App() {
       const detected = data.detected || sourceLang
       setOutput(data.translation || '')
       setDetectedLang(detected)
-      if (detected && data.translation) {
-        const id = fromMic ? uid() : (draftRef.current || uid())
-        if (fromMic) draftRef.current = null
-        else draftRef.current = id
-        rememberTurn({
-          id,
-          at: Date.now(),
-          speaker: fromMic ? (sourceLang === 'pt' ? 'me' : 'you') : 'typed',
-          sourceLang: detected,
-          original: trimmed.slice(0, MAX_TEXT_LENGTH),
-          translation: data.translation,
-        }, fromMic ? null : id)
-      }
     } catch (err) {
       if (err.name === 'AbortError') return
       setOutput('')
@@ -253,11 +198,10 @@ export default function App() {
       setDetectedLang(null)
       setLoading(false)
       setSpeaking(false)
-      dropDraft()
       return
     }
     debounceRef.current = setTimeout(() => {
-      translateText(clamped, null, { fromMic: false })
+      translateText(clamped, null)
     }, 700)
   }
 
@@ -271,7 +215,6 @@ export default function App() {
     setDetectedLang(null)
     setLoading(false)
     setSpeaking(false)
-    dropDraft()
   }
 
   async function cancelCapture() {
@@ -329,7 +272,7 @@ export default function App() {
         return
       }
       setInput(text)
-      await translateText(text, sourceLang, { fromMic: true })
+      await translateText(text, sourceLang)
     } catch (err) {
       if (generation === genRef.current) setError(err.message || 'Não consegui entender o áudio.')
       setLoading(false)
@@ -354,7 +297,7 @@ export default function App() {
         return
       }
       setInput(text)
-      await translateText(text, sourceLang, { fromMic: true })
+      await translateText(text, sourceLang)
     } catch (err) {
       if (generation === genRef.current) setError(micErrorMessage(err))
     } finally {
@@ -366,26 +309,23 @@ export default function App() {
   }
 
   function applyTableEvent(event) {
-    if (event.type === 'status' && event.phase) setLivePhase(event.phase)
-    if (event.type === 'error' && event.message) setError(event.message)
-    if (event.type === 'caption' || event.type === 'turn') {
-      const sourceLang = event.sourceLang === 'es' || event.sourceLang === 'pt' ? event.sourceLang : null
-      const translation = polishTranslation(event.translation || '', sourceLang ? targetLang(sourceLang) : null)
-      if (sourceLang) setDetectedLang(sourceLang)
-      setInput(event.original || '')
-      setOutput(translation)
-      if (translation) setLivePhase('translating')
-      if (event.type === 'turn' && (event.original || translation) && sourceLang) {
-        draftRef.current = null
-        rememberTurn({
-          id: uid(),
-          at: Date.now(),
-          speaker: 'live',
-          sourceLang,
-          original: event.original || '',
-          translation,
-        })
-      }
+    if (event.type === 'status' && event.phase) {
+      setLivePhase(event.phase)
+      if (event.phase === 'translating') setLoading(true)
+      if (event.phase === 'listening') setLoading(false)
+    }
+    if (event.type === 'error' && event.message) {
+      setError(event.message)
+      setLoading(false)
+    }
+    if (event.type !== 'caption' && event.type !== 'turn') return
+    const sourceLang = event.sourceLang === 'es' || event.sourceLang === 'pt' ? event.sourceLang : null
+    if (sourceLang) setDetectedLang(sourceLang)
+    if (event.original) setInput(event.original)
+    if (event.translation) {
+      setOutput(polishTranslation(event.translation, sourceLang ? targetLang(sourceLang) : null))
+      setLoading(false)
+      setError(null)
     }
   }
 
@@ -414,8 +354,13 @@ export default function App() {
     setSpeaking(false)
     setError(null)
     const generation = ++genRef.current
-    const available = await ensureCaps()
+    const known = capsRef.current
     try {
+      if (canRecord() && known?.speech !== false) {
+        await runServerRecording(side, sourceLang, generation)
+        return
+      }
+      const available = known || await ensureCaps()
       if (available.speech && canRecord()) {
         await runServerRecording(side, sourceLang, generation)
         return
@@ -438,23 +383,38 @@ export default function App() {
       setInput('')
       setOutput('')
       setDetectedLang(null)
+      setLoading(false)
       return
     }
     if (startingLive.current) return
     startingLive.current = true
+    let stream = null
     try {
-      await beginLive()
+      if (!canRecord()) {
+        setError('Este navegador não oferece o microfone do modo ao vivo. Dá para digitar, ou usar Eu falo e Você fala.')
+        return
+      }
+      if (capsRef.current && !capsRef.current.live) {
+        setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
+        return
+      }
+      stream = await openMic()
+      const available = capsRef.current || await ensureCaps()
+      if (!available.live) {
+        stream.getTracks().forEach(track => track.stop())
+        setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
+        return
+      }
+      await beginLive(stream)
+    } catch (err) {
+      stream?.getTracks().forEach(track => track.stop())
+      setError(micErrorMessage(err))
     } finally {
       startingLive.current = false
     }
   }
 
-  async function beginLive() {
-    const available = await ensureCaps()
-    if (!available.live) {
-      setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
-      return
-    }
+  async function beginLive(stream) {
     if (recordingSide) await cancelCapture()
     clearTimeout(debounceRef.current)
     abortRef.current?.abort()
@@ -470,6 +430,7 @@ export default function App() {
     const generation = ++genRef.current
     try {
       const session = await startTableLive({
+        stream,
         onEvent: (event) => {
           if (generation !== genRef.current) return
           applyTableEvent(event)
@@ -486,19 +447,6 @@ export default function App() {
         stopTableLive()
       }
     }
-  }
-
-  function askClearHistory() {
-    if (!confirmClear) {
-      setConfirmClear(true)
-      clearTimeout(clearTimer.current)
-      clearTimer.current = setTimeout(() => setConfirmClear(false), 3000)
-      return
-    }
-    clearTimeout(clearTimer.current)
-    draftRef.current = null
-    setHistory([])
-    setConfirmClear(false)
   }
 
   const inTheme = themeFor(detectedLang)
@@ -552,11 +500,6 @@ export default function App() {
             </button>
           </div>
 
-          {liveOn && (
-            <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#666', lineHeight: 1.45 }}>
-              Pode deixar o celular na mesa. A tradução aparece escrita. Toque em Ouvir para escutar.
-            </p>
-          )}
           {caps && !caps.speech && (
             <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#777', lineHeight: 1.45 }}>
               Sem a chave da OpenAI, o microfone usa o navegador. No iPhone ele fica mais firme com essa chave.
@@ -611,6 +554,7 @@ export default function App() {
             <div style={{ flex: 1, height: 1, background: '#ddd' }}/>
           </div>
 
+          <div ref={outputRef}>
           <ExchangeCard
             theme={outTheme}
             label={outTheme ? `${outTheme.flag} ${outTheme.name.toUpperCase()}` : '🔤 TRADUÇÃO'}
@@ -624,60 +568,14 @@ export default function App() {
             </div>
             {output && !loading && (
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '0 10px 10px' }}>
-                <button type="button" onClick={() => speakTranslation(output, outLang)} style={pill(outTheme, speaking)}>
+                <button type="button" onPointerDown={unlockAudio} onClick={() => speakTranslation(output, outLang)} style={pill(outTheme, speaking)}>
                   <SpeakerIcon muted={false}/> {speaking ? 'Falando' : 'Ouvir'}
                 </button>
                 <CopyButton text={output} theme={outTheme}/>
               </div>
             )}
           </ExchangeCard>
-
-          <section style={{ marginTop: 18 }} aria-label="Conversa">
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-              <h2 style={{ margin: 0, fontSize: 13, letterSpacing: '0.04em', color: '#888' }}>CONVERSA</h2>
-              {history.length > 0 && (
-                <button type="button" onClick={askClearHistory} style={textButton}>
-                  {confirmClear ? 'Apagar tudo?' : 'Limpar conversa'}
-                </button>
-              )}
-            </div>
-            {history.length === 0 ? (
-              <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.45 }}>
-                As frases ficam salvas neste celular, mesmo se você fechar a página.
-              </p>
-            ) : (
-              <div className="history-list">
-                {history.map(turn => {
-                  const from = themeFor(turn.sourceLang)
-                  const to = themeFor(targetLang(turn.sourceLang))
-                  const who = turn.speaker === 'you' ? 'Você' : turn.speaker === 'me' ? 'Eu' : turn.speaker === 'live' ? (turn.sourceLang === 'es' ? 'Espanhol' : 'Português') : 'Digitado'
-                  return (
-                    <article key={turn.id} style={{
-                      background: '#fff', borderRadius: 14, padding: '10px 12px',
-                      boxShadow: '0 1px 6px rgba(0,0,0,.05)',
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: from?.text || '#555' }}>
-                          {from?.flag} {who}
-                        </span>
-                        <span style={{ fontSize: 11, color: '#aaa' }}>{clock(turn.at)}</span>
-                      </div>
-                      <p style={{ margin: '0 0 6px', fontSize: 15, lineHeight: 1.45, color: '#222' }}>{turn.original}</p>
-                      <p style={{ margin: 0, fontSize: 15, lineHeight: 1.45, color: to?.text || '#333' }}>
-                        {to?.flag} {turn.translation}
-                      </p>
-                      {turn.translation && (
-                        <button type="button" onClick={() => speakTranslation(turn.translation, targetLang(turn.sourceLang))} style={{ ...textButton, marginTop: 6 }}>
-                          Ouvir
-                        </button>
-                      )}
-                    </article>
-                  )
-                })}
-                <div ref={historyEndRef}/>
-              </div>
-            )}
-          </section>
+          </div>
         </div>
       </div>
 
@@ -686,7 +584,7 @@ export default function App() {
           <div className="app-column" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 64 }}>
             <span className="rec-dot"/>
             <span style={{ fontSize: 16, fontWeight: 700, color: '#111' }}>
-              {livePhase === 'connecting' ? 'Conectando…' : 'Ouvindo os dois'}
+              {livePhase === 'connecting' ? 'Conectando…' : livePhase === 'translating' ? 'Traduzindo…' : 'Ouvindo os dois'}
             </span>
           </div>
         ) : (
