@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, chooseLiveTarget, createEndpoint, detectSpokenLang, emptyLiveBuffers, languageFromTranscript, liveDirectionTarget, parseTranslation, polishTranslation, readEphemeralToken, stepEndpoint, TRANSLATION_MODEL, UTTERANCE_LIMIT_MS } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, buildTranslationPrompt, chooseLiveTarget, createEndpoint, detectSpokenLang, emptyLiveBuffers, languageFromTranscript, liveDirectionTarget, parseTranslation, polishTranslation, readEphemeralToken, stepEndpoint, TRANSLATION_MODEL, translationRepeatsSource, UTTERANCE_LIMIT_MS } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -77,6 +77,124 @@ test('translate handler calls Haiku and forces the mic language', async () => {
     assert.equal('temperature' in sent, false)
     assert.match(sent.messages[0].content, /oi/)
     assert.doesNotMatch(sent.messages[0].content, /e ele/)
+    assert.equal(sent.messages[0].content, buildTranslationPrompt({ text: 'oi', sourceLang: 'pt' }))
+  } finally {
+    process.env.ANTHROPIC_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+const USER_PT = 'Vendo o povo se matar no brasil por causa de politica.'
+const USER_PT_ES = 'Viendo a la gente matarse en Brasil por culpa de la política.'
+
+test('typed Portuguese is sent to Spanish even without a source language', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY
+  const previousFetch = globalThis.fetch
+  process.env.ANTHROPIC_API_KEY = 'test-key'
+  const sent = []
+  globalThis.fetch = async (_url, options) => {
+    sent.push(JSON.parse(options.body))
+    return {
+      ok: true,
+      json: async () => ({ content: [{ type: 'text', text: JSON.stringify({ translation: USER_PT_ES, detected: 'es' }) }] }),
+    }
+  }
+  try {
+    const res = mockRes()
+    await translate({
+      method: 'POST',
+      body: { text: USER_PT, history: [{ original: 'frase antiga', translation: 'frase vieja' }] },
+    }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.translation, USER_PT_ES)
+    assert.equal(res.body.detected, 'pt')
+    assert.equal(res.body.target, 'es')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].messages[0].content, buildTranslationPrompt({ text: USER_PT, sourceLang: 'pt' }))
+    assert.doesNotMatch(sent[0].messages[0].content, /frase antiga/)
+    assert.doesNotMatch(JSON.stringify(sent[0]), /history/)
+  } finally {
+    process.env.ANTHROPIC_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('typed Spanish is sent to Portuguese even without a source language', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY
+  const previousFetch = globalThis.fetch
+  process.env.ANTHROPIC_API_KEY = 'test-key'
+  let sent
+  globalThis.fetch = async (_url, options) => {
+    sent = JSON.parse(options.body)
+    return {
+      ok: true,
+      json: async () => ({ content: [{ type: 'text', text: '{"translation":"Onde fica o banheiro?","detected":"pt"}' }] }),
+    }
+  }
+  try {
+    const res = mockRes()
+    await translate({ method: 'POST', body: { text: 'Donde esta el bano?' } }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.translation, 'Onde fica o banheiro?')
+    assert.equal(res.body.detected, 'es')
+    assert.equal(res.body.target, 'pt')
+    assert.equal(sent.messages[0].content, buildTranslationPrompt({ text: 'Donde esta el bano?', sourceLang: 'es' }))
+  } finally {
+    process.env.ANTHROPIC_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('an explicit mic language wins over the written-language guess', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY
+  const previousFetch = globalThis.fetch
+  process.env.ANTHROPIC_API_KEY = 'test-key'
+  let sent
+  globalThis.fetch = async (_url, options) => {
+    sent = JSON.parse(options.body)
+    return {
+      ok: true,
+      json: async () => ({ content: [{ type: 'text', text: '{"translation":"Já estava em português.","detected":"es"}' }] }),
+    }
+  }
+  try {
+    const res = mockRes()
+    await translate({ method: 'POST', body: { text: USER_PT, sourceLang: 'es' } }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.detected, 'es')
+    assert.equal(res.body.target, 'pt')
+    assert.equal(sent.messages[0].content, buildTranslationPrompt({ text: USER_PT, sourceLang: 'es' }))
+  } finally {
+    process.env.ANTHROPIC_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('a same-language paraphrase is retried with an explicit target', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY
+  const previousFetch = globalThis.fetch
+  process.env.ANTHROPIC_API_KEY = 'test-key'
+  const replies = [
+    '{"translation":"Vendo a gente se matar no Brasil por causa de política.","detected":"pt"}',
+    JSON.stringify({ translation: USER_PT_ES, detected: 'pt' }),
+  ]
+  const sent = []
+  globalThis.fetch = async (_url, options) => {
+    sent.push(JSON.parse(options.body))
+    const text = replies[sent.length - 1]
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text }] }) }
+  }
+  try {
+    const res = mockRes()
+    await translate({ method: 'POST', body: { text: USER_PT } }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.translation, USER_PT_ES)
+    assert.equal(res.body.detected, 'pt')
+    assert.equal(res.body.target, 'es')
+    assert.equal(sent.length, 2)
+    assert.equal(sent[1].messages[0].content, buildTranslationPrompt({ text: USER_PT, sourceLang: 'pt', strict: true }))
+    assert.match(sent[1].messages[0].content, /tentativa anterior/)
+    assert.doesNotMatch(sent[0].messages[0].content, /tentativa anterior/)
   } finally {
     process.env.ANTHROPIC_API_KEY = previous
     globalThis.fetch = previousFetch
@@ -147,6 +265,53 @@ test('spoken language detects Portuguese and Spanish without a fixed direction',
   assert.equal(detectSpokenLang('no, mañana'), 'es')
   assert.equal(detectSpokenLang('sí'), 'es')
   assert.equal(detectSpokenLang('ok'), null)
+  assert.equal(detectSpokenLang('Vendo o povo se matar no brasil por causa de politica.'), 'pt')
+  assert.equal(detectSpokenLang('Quero um cafe sem acucar, por favor.'), 'pt')
+  assert.equal(detectSpokenLang('Amanha eu vou para o trabalho de onibus.'), 'pt')
+  assert.equal(detectSpokenLang('Onde fica o banheiro?'), 'pt')
+  assert.equal(detectSpokenLang('A casa é grande.'), 'pt')
+  assert.equal(detectSpokenLang('La casa es grande.'), 'es')
+  assert.equal(detectSpokenLang('Estoy viendo a la gente matarse en Brasil por la politica.'), 'es')
+  assert.equal(detectSpokenLang('Quiero un cafe sin azucar, por favor.'), 'es')
+  assert.equal(detectSpokenLang('Donde esta el bano?'), 'es')
+  assert.equal(detectSpokenLang('Manana voy al trabajo en autobus.'), 'es')
+  assert.equal(detectSpokenLang('Puedes ayudarme con esto ahora?'), 'es')
+  assert.equal(detectSpokenLang('No entendi lo que dijo en la reunion.'), 'es')
+  assert.equal(detectSpokenLang('Brasil'), null)
+})
+
+test('ambiguous text still names both target languages', () => {
+  const prompt = buildTranslationPrompt({ text: 'Brasil' })
+  assert.match(prompt, /Se o texto estiver em português, traduza para espanhol da Espanha/)
+  assert.match(prompt, /Se o texto estiver em espanhol, traduza para português do Brasil/)
+  assert.doesNotMatch(prompt, /Idioma de origem: pt\./)
+  assert.doesNotMatch(prompt, /tentativa anterior/)
+})
+
+test('same-language echoes are not treated as translations', () => {
+  assert.equal(translationRepeatsSource(
+    'Vendo o povo se matar no brasil por causa de politica.',
+    'Vendo a gente se matar no Brasil por causa de política.',
+  ), true)
+  assert.equal(translationRepeatsSource(
+    'Amanha eu vou para o trabalho de onibus.',
+    'Amanhã eu vou para o trabalho de ônibus.',
+  ), true)
+  assert.equal(translationRepeatsSource(
+    'Quero um cafe sem acucar, por favor.',
+    'Quero um café sem açúcar, por favor.',
+  ), true)
+  assert.equal(translationRepeatsSource('Onde fica o banheiro?', 'Onde fica o banheiro?'), true)
+  assert.equal(translationRepeatsSource(
+    'Vendo o povo se matar no brasil por causa de politica.',
+    'Viendo a la gente matarse en Brasil por culpa de la política.',
+  ), false)
+  assert.equal(translationRepeatsSource(
+    'Estoy viendo a la gente matarse en Brasil por la política.',
+    'Estou vendo as pessoas se matando no Brasil por causa da política.',
+  ), false)
+  assert.equal(translationRepeatsSource('oi', 'hola'), false)
+  assert.equal(translationRepeatsSource('Bom dia, tudo bem?', 'Buenos días, todo bien?'), false)
 })
 
 test('live direction follows whichever language was just spoken', () => {
