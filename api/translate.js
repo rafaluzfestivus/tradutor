@@ -64,8 +64,8 @@ export default async function handler(req, res) {
   const trimmed = text.trim()
 
   try {
-    // Typed text does not name a language. Haiku paraphrases Portuguese unless
-    // the request itself says to translate into Spanish (or the reverse).
+    // Typed text does not name a language. Haiku stays in the same language
+    // unless the request names the source and asks for the other one.
     let sourceLang = requested || detectSpokenLang(trimmed)
     let result = await completeTranslation(trimmed, sourceLang, false)
     if (result.error) {

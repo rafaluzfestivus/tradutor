@@ -145,6 +145,40 @@ test('typed Spanish is sent to Portuguese even without a source language', async
   }
 })
 
+test('typed Spanish congratulations ask for Portuguese', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY
+  const previousFetch = globalThis.fetch
+  process.env.ANTHROPIC_API_KEY = 'test-key'
+  const text = 'Ganó Lula! Enhorabuena no?'
+  const translation = 'Lula ganhou! Parabéns, né?'
+  const sent = []
+  globalThis.fetch = async (_url, options) => {
+    sent.push(JSON.parse(options.body))
+    return {
+      ok: true,
+      json: async () => ({ content: [{ type: 'text', text: JSON.stringify({ translation, detected: 'pt' }) }] }),
+    }
+  }
+  try {
+    const res = mockRes()
+    await translate({
+      method: 'POST',
+      body: { text, history: [{ original: 'frase antiga', translation: 'frase vieja' }] },
+    }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.translation, translation)
+    assert.equal(res.body.detected, 'es')
+    assert.equal(res.body.target, 'pt')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].messages[0].content, buildTranslationPrompt({ text, sourceLang: 'es' }))
+    assert.doesNotMatch(sent[0].messages[0].content, /frase antiga/)
+    assert.doesNotMatch(JSON.stringify(sent[0]), /history/)
+  } finally {
+    process.env.ANTHROPIC_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('an explicit mic language wins over the written-language guess', async () => {
   const previous = process.env.ANTHROPIC_API_KEY
   const previousFetch = globalThis.fetch
@@ -274,6 +308,9 @@ test('spoken language detects Portuguese and Spanish without a fixed direction',
   assert.equal(detectSpokenLang('Estoy viendo a la gente matarse en Brasil por la politica.'), 'es')
   assert.equal(detectSpokenLang('Quiero un cafe sin azucar, por favor.'), 'es')
   assert.equal(detectSpokenLang('Donde esta el bano?'), 'es')
+  assert.equal(detectSpokenLang('Ganó Lula! Enhorabuena no?'), 'es')
+  assert.equal(detectSpokenLang('Enhorabuena'), 'es')
+  assert.equal(detectSpokenLang('O Lula ganhou! Parabéns!'), 'pt')
   assert.equal(detectSpokenLang('Manana voy al trabajo en autobus.'), 'es')
   assert.equal(detectSpokenLang('Puedes ayudarme con esto ahora?'), 'es')
   assert.equal(detectSpokenLang('No entendi lo que dijo en la reunion.'), 'es')
