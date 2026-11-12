@@ -6,31 +6,50 @@ function apiDevPlugin() {
   return {
     name: 'api-dev',
     configureServer(server) {
-      server.middlewares.use('/api/translate', (req, res) => {
-        if (req.method !== 'POST') { res.statusCode = 405; res.end(); return }
+      server.middlewares.use(async (req, res, next) => {
+        const url = req.url?.split('?')[0] || ''
+        const match = url.match(/^\/api\/([a-z0-9-]+)\/?$/)
+        if (!match) return next()
+
         const chunks = []
-        req.on('data', c => chunks.push(c))
+        req.on('data', chunk => chunks.push(chunk))
         req.on('end', async () => {
           const wrapped = {
             _code: 200,
-            status(c) { this._code = c; return this },
-            end() { res.statusCode = this._code; res.end() },
-            json(data) {
+            _headers: {},
+            status(code) { this._code = code; return this },
+            setHeader(name, value) { this._headers[name] = value; return this },
+            end(body) {
+              if (res.writableEnded) return
               res.statusCode = this._code
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify(data))
-            }
+              for (const [name, value] of Object.entries(this._headers)) res.setHeader(name, value)
+              res.end(body)
+            },
+            json(data) {
+              this.setHeader('Content-Type', 'application/json; charset=utf-8')
+              this.end(JSON.stringify(data))
+            },
           }
           try {
-            req.body = JSON.parse(Buffer.concat(chunks).toString())
-            const mod = await server.ssrLoadModule('/api/translate.js')
+            const raw = Buffer.concat(chunks).toString()
+            if (raw) {
+              try { req.body = JSON.parse(raw) }
+              catch { wrapped.status(400).json({ error: 'JSON inválido.' }); return }
+            } else {
+              req.body = {}
+            }
+            const mod = await server.ssrLoadModule(`/api/${match[1]}.js`)
             await mod.default(req, wrapped)
-          } catch (e) {
-            wrapped.status(500).json({ error: 'Dev API error: ' + e.message })
+            if (!res.writableEnded) wrapped.end()
+          } catch (error) {
+            const missing = /failed to load|does not exist|ENOENT/i.test(String(error?.message || error))
+            wrapped.status(missing ? 404 : 500).json({
+              error: missing ? 'Não encontrado.' : 'Erro local da API.',
+            })
           }
         })
       })
-    }
+    },
   }
 }
 
@@ -52,9 +71,9 @@ export default defineConfig({
         start_url: '/',
         icons: [
           { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' }
-        ]
-      }
-    })
-  ]
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+        ],
+      },
+    }),
+  ],
 })
