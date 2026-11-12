@@ -1,4 +1,4 @@
-import { buildLiveSession, readEphemeralToken, upstreamErrorMessage } from '../lib/conversation.js'
+import { buildLiveSession, isOpenAiAuthStatus, OPENAI_AUTH_CODE, OPENAI_AUTH_MESSAGE, readEphemeralToken, upstreamErrorMessage } from '../lib/conversation.js'
 
 const TARGETS = new Set(['es', 'pt'])
 
@@ -29,6 +29,10 @@ export default async function handler(req, res) {
     })
 
     const secretJson = await secretRes.json().catch(() => ({}))
+    if (isOpenAiAuthStatus(secretRes.status)) {
+      console.error('Live secret auth:', secretRes.status)
+      return res.status(503).json({ error: OPENAI_AUTH_MESSAGE, code: OPENAI_AUTH_CODE })
+    }
     const token = readEphemeralToken(secretJson)
     if (!secretRes.ok || !token) {
       const detail = upstreamErrorMessage(secretJson, secretRes.status)
@@ -47,6 +51,10 @@ export default async function handler(req, res) {
     })
 
     const answer = await callRes.text()
+    if (isOpenAiAuthStatus(callRes.status)) {
+      console.error('Live call auth:', callRes.status)
+      return res.status(503).json({ error: OPENAI_AUTH_MESSAGE, code: OPENAI_AUTH_CODE })
+    }
     if (!callRes.ok || !answer.includes('v=0')) {
       let detail = `OpenAI respondeu ${callRes.status}`
       try {

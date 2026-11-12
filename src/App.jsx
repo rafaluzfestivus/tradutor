@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { MAX_TEXT_LENGTH, polishTranslation, targetLang } from '../lib/conversation.js'
+import { chooseLiveEngine, chooseMicEngine, initialListenLang, MAX_TEXT_LENGTH, OPENAI_AUTH_CODE, OPENAI_AUTH_MESSAGE, polishTranslation, targetLang } from '../lib/conversation.js'
 import {
   blobToBase64,
   browserSpeak,
+  canBrowserRecognize,
   canRecord,
   micErrorMessage,
   openMic,
   playBase64Audio,
+  startBrowserLive,
   startBrowserRecognition,
   startRecorder,
   startTableLive,
@@ -136,6 +138,7 @@ export default function App() {
           })
           const data = await res.json().catch(() => ({}))
           if (generation !== speakGen.current) return
+          if (data.code === OPENAI_AUTH_CODE) markOpenAiExpired()
           if (res.ok && data.audio) played = await playBase64Audio(data.audio, data.mime)
         } catch {
           /* phone voice below */
@@ -264,6 +267,7 @@ export default function App() {
       })
       const data = await res.json().catch(() => ({}))
       if (generation !== genRef.current) return
+      if (data.code === OPENAI_AUTH_CODE) markOpenAiExpired()
       if (!res.ok) throw new Error(data.error || 'Não consegui entender o áudio.')
       const text = (data.text || '').trim()
       if (!text) {
@@ -308,7 +312,31 @@ export default function App() {
     }
   }
 
+  function markOpenAiExpired() {
+    const next = {
+      ...(capsRef.current || { translate: true }),
+      speech: false,
+      live: false,
+      openai: 'expired',
+    }
+    capsRef.current = next
+    setCaps(next)
+  }
+
   function applyTableEvent(event) {
+    if (event.code === OPENAI_AUTH_CODE) {
+      markOpenAiExpired()
+      setError(event.message || OPENAI_AUTH_MESSAGE)
+      setLoading(false)
+      stopTableLive()
+      return
+    }
+    if (event.type === 'fatal') {
+      setError(event.message || 'O navegador não deixou o Ao vivo continuar.')
+      setLoading(false)
+      stopTableLive()
+      return
+    }
     if (event.type === 'status' && event.phase) {
       setLivePhase(event.phase)
       if (event.phase === 'translating') setLoading(true)
@@ -340,7 +368,6 @@ export default function App() {
   }
 
   async function handleMic(side) {
-    unlockAudio()
     const sourceLang = side === 'you' ? 'es' : 'pt'
     if (recordingSide === side) {
       if (recorderRef.current) recorderRef.current.stop()
@@ -355,17 +382,15 @@ export default function App() {
     setError(null)
     const generation = ++genRef.current
     const known = capsRef.current
+    const engine = chooseMicEngine({
+      speech: known ? Boolean(known.speech) : null,
+      canRecord: canRecord(),
+      browser: canBrowserRecognize(),
+    })
+    if (engine === 'server') unlockAudio()
     try {
-      if (canRecord() && known?.speech !== false) {
-        await runServerRecording(side, sourceLang, generation)
-        return
-      }
-      const available = known || await ensureCaps()
-      if (available.speech && canRecord()) {
-        await runServerRecording(side, sourceLang, generation)
-        return
-      }
-      await runBrowserRecording(side, sourceLang, generation)
+      if (engine === 'server') await runServerRecording(side, sourceLang, generation)
+      else await runBrowserRecording(side, sourceLang, generation)
     } catch (err) {
       if (generation === genRef.current) {
         setError(micErrorMessage(err))
@@ -376,8 +401,44 @@ export default function App() {
     }
   }
 
+  function beginBrowserLive() {
+    recorderRef.current?.stop()
+    recorderRef.current = null
+    browserRef.current?.stop()
+    browserRef.current = null
+    setRecordingSide(null)
+    clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    stopPlayback()
+    setSpeaking(false)
+    setError(null)
+    setInput('')
+    setOutput('')
+    setDetectedLang(null)
+    liveOnRef.current = true
+    setLiveOn(true)
+    setLivePhase('listening')
+    const generation = ++genRef.current
+    try {
+      const session = startBrowserLive({
+        initialLang: initialListenLang(navigator.language),
+        onEvent: (event) => {
+          if (generation !== genRef.current) return
+          applyTableEvent(event)
+        },
+      })
+      if (generation !== genRef.current) {
+        session.stop()
+        return
+      }
+      liveRef.current = session
+    } catch (err) {
+      setError(micErrorMessage(err))
+      stopTableLive()
+    }
+  }
+
   async function toggleLive() {
-    unlockAudio()
     if (liveOnRef.current) {
       stopTableLive()
       setInput('')
@@ -387,22 +448,38 @@ export default function App() {
       return
     }
     if (startingLive.current) return
+    const known = capsRef.current
+    const engine = chooseLiveEngine({
+      live: known ? Boolean(known.live) : null,
+      canRecord: canRecord(),
+      browser: canBrowserRecognize(),
+    })
+    if (engine === 'browser') {
+      beginBrowserLive()
+      return
+    }
+    if (engine === 'none') {
+      setError(known?.openai === 'expired'
+        ? OPENAI_AUTH_MESSAGE
+        : 'Este navegador não oferece o microfone do modo ao vivo. Dá para digitar, ou usar Eu falo e Você fala.')
+      return
+    }
+    unlockAudio()
     startingLive.current = true
     let stream = null
     try {
-      if (!canRecord()) {
-        setError('Este navegador não oferece o microfone do modo ao vivo. Dá para digitar, ou usar Eu falo e Você fala.')
-        return
-      }
-      if (capsRef.current && !capsRef.current.live) {
-        setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
-        return
-      }
       stream = await openMic()
       const available = capsRef.current || await ensureCaps()
       if (!available.live) {
         stream.getTracks().forEach(track => track.stop())
-        setError('O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
+        stream = null
+        if (canBrowserRecognize()) {
+          beginBrowserLive()
+          return
+        }
+        setError(available.openai === 'expired'
+          ? OPENAI_AUTH_MESSAGE
+          : 'O modo ao vivo precisa da chave da OpenAI na Vercel. O tradutor normal continua funcionando.')
         return
       }
       await beginLive(stream)
@@ -489,7 +566,7 @@ export default function App() {
               <div style={{ fontSize: 14, fontWeight: 700, color: '#222' }}>Ao vivo</div>
               <div style={{ fontSize: 12, color: '#888', lineHeight: 1.35 }}>Ouve os dois e escreve a tradução</div>
             </div>
-            <button type="button" role="switch" aria-checked={liveOn} aria-label="Modo ao vivo" onPointerDown={unlockAudio} onClick={toggleLive} style={{
+            <button type="button" role="switch" aria-checked={liveOn} aria-label="Modo ao vivo" onClick={toggleLive} style={{
               width: 52, height: 32, borderRadius: 999, border: 'none', cursor: 'pointer', position: 'relative',
               background: liveOn ? '#009c3b' : '#d0d0d0', transition: 'background .15s', flex: 'none',
             }}>
@@ -500,7 +577,12 @@ export default function App() {
             </button>
           </div>
 
-          {caps && !caps.speech && (
+          {caps?.openai === 'expired' && (
+            <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#777', lineHeight: 1.45 }}>
+              A chave da OpenAI expirou. Eu falo, Você fala e o Ao vivo usam o microfone do navegador até você atualizar a chave na Vercel.
+            </p>
+          )}
+          {caps && !caps.speech && caps.openai !== 'expired' && (
             <p style={{ margin: '0 4px 12px', fontSize: 12, color: '#777', lineHeight: 1.45 }}>
               Sem a chave da OpenAI, o microfone usa o navegador. No iPhone ele fica mais firme com essa chave.
             </p>
@@ -644,7 +726,6 @@ function MicButton({ label, hint, theme, active, disabled, onClick }) {
   return (
     <button
       type="button"
-      onPointerDown={unlockAudio}
       onClick={onClick}
       disabled={disabled}
       aria-pressed={active}

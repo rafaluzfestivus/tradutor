@@ -1,4 +1,4 @@
-import { languageFromTranscript, MAX_AUDIO_BASE64, TRANSCRIBE_MODEL } from '../lib/conversation.js'
+import { isOpenAiAuthStatus, languageFromTranscript, MAX_AUDIO_BASE64, OPENAI_AUTH_CODE, OPENAI_AUTH_MESSAGE, TRANSCRIBE_MODEL } from '../lib/conversation.js'
 
 const LANGS = {
   pt: {
@@ -58,6 +58,9 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       console.error('Transcribe error:', response.status)
+      if (isOpenAiAuthStatus(response.status)) {
+        return res.status(503).json({ error: OPENAI_AUTH_MESSAGE, code: OPENAI_AUTH_CODE })
+      }
       return res.status(502).json({ error: 'Não consegui entender o áudio.' })
     }
 

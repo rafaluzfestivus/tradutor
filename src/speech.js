@@ -1,4 +1,4 @@
-import { createEndpoint, detectSpokenLang, releaseEndpoint, stepEndpoint } from '../lib/conversation.js'
+import { createEndpoint, detectSpokenLang, nextListenLang, releaseEndpoint, stepEndpoint } from '../lib/conversation.js'
 
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA='
 
@@ -245,10 +245,117 @@ export function startBrowserRecognition(sourceLang) {
       resolve('')
     }
   })
-  recognition.start()
+  try {
+    recognition.start()
+  } catch (error) {
+    if (!settled) {
+      settled = true
+      reject(error)
+    }
+  }
   return {
     result,
-    stop() { recognition.stop() },
+    stop() {
+      try { recognition.stop() } catch { /* already stopped */ }
+    },
+  }
+}
+
+export function canBrowserRecognize() {
+  return Boolean(typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition))
+}
+
+export function startBrowserLive({ onEvent, initialLang = 'pt' } = {}) {
+  let stopped = false
+  let paused = false
+  let lang = initialLang === 'es' ? 'es' : 'pt'
+  let token = 0
+  let active = null
+
+  const emit = (event) => { if (!stopped) onEvent(event) }
+
+  const schedule = () => {
+    const scheduled = token
+    setTimeout(() => {
+      if (!stopped && !paused && scheduled === token) listen()
+    }, 250)
+  }
+
+  const listen = () => {
+    if (stopped || paused) return
+    const session = startBrowserRecognition(lang)
+    if (!session) {
+      emit({ type: 'fatal', message: 'Este navegador não oferece microfone.' })
+      return
+    }
+    const mine = ++token
+    active = session
+    emit({ type: 'status', phase: 'listening' })
+    session.result.then(async (text) => {
+      if (stopped || paused || mine !== token) return
+      active = null
+      const original = String(text || '').trim()
+      if (!original) {
+        schedule()
+        return
+      }
+      const sourceLang = detectSpokenLang(original) || lang
+      emit({ type: 'caption', sourceLang, original, translation: '' })
+      emit({ type: 'status', phase: 'translating' })
+      try {
+        const translatedRes = await fetch('/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: original, sourceLang }),
+        })
+        const translated = await translatedRes.json().catch(() => ({}))
+        if (stopped || paused || mine !== token) return
+        if (!translatedRes.ok) throw new Error(translated.error || 'Deu ruim na tradução.')
+        const translation = (translated.translation || '').trim()
+        const detected = translated.detected || sourceLang
+        if (!translation) throw new Error('Tradução não encontrada.')
+        emit({ type: 'turn', sourceLang: detected, original, translation })
+        lang = nextListenLang(detected) || lang
+      } catch (error) {
+        if (!stopped && mine === token) {
+          emit({ type: 'error', message: error?.message || 'Deu ruim no modo ao vivo.', code: error?.code })
+        }
+      }
+      if (!stopped && !paused && mine === token) schedule()
+    }).catch((error) => {
+      if (stopped || paused || mine !== token) return
+      active = null
+      if (error?.code === 'no-speech' || error?.code === 'aborted') {
+        schedule()
+        return
+      }
+      const blocked = error?.code === 'not-allowed' || error?.name === 'NotAllowedError'
+      emit({
+        type: blocked ? 'fatal' : 'error',
+        message: micErrorMessage(error),
+        code: error?.code,
+      })
+      if (!blocked) schedule()
+    })
+  }
+
+  emit({ type: 'engine', engine: 'browser' })
+  listen()
+
+  return {
+    setPaused(value) {
+      paused = Boolean(value)
+      token += 1
+      try { active?.stop() } catch { /* already stopped */ }
+      active = null
+      if (!paused) listen()
+    },
+    stop() {
+      stopped = true
+      token += 1
+      try { active?.stop() } catch { /* already stopped */ }
+      active = null
+    },
   }
 }
 
@@ -357,7 +464,11 @@ async function startUtteranceLive({ onEvent, stream }) {
         body: JSON.stringify({ audio, mime: blob.type }),
       })
       const heard = await heardRes.json().catch(() => ({}))
-      if (!heardRes.ok) throw new Error(heard.error || 'Não consegui entender o áudio.')
+      if (!heardRes.ok) {
+        const error = new Error(heard.error || 'Não consegui entender o áudio.')
+        error.code = heard.code
+        throw error
+      }
       const original = (heard.text || '').trim()
       if (!original) {
         listen()
@@ -377,7 +488,7 @@ async function startUtteranceLive({ onEvent, stream }) {
       if (!translation) throw new Error('Tradução não encontrada.')
       onEvent({ type: 'turn', sourceLang: detected, original, translation })
     } catch (error) {
-      if (!stopped) onEvent({ type: 'error', message: error?.message || 'Deu ruim no modo ao vivo.' })
+      if (!stopped) onEvent({ type: 'error', message: error?.message || 'Deu ruim no modo ao vivo.', code: error?.code })
     } finally {
       busy = false
       if (!stopped && !paused) listen()
