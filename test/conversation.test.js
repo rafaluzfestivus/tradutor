@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, buildTranslationPrompt, chooseLiveTarget, createEndpoint, detectSpokenLang, emptyLiveBuffers, languageFromTranscript, liveDirectionTarget, parseTranslation, polishTranslation, readEphemeralToken, stepEndpoint, TRANSLATION_MODEL, translationRepeatsSource, UTTERANCE_LIMIT_MS } from '../lib/conversation.js'
+import { applyLiveEvent, buildAnthropicRequest, buildLiveSession, buildTranslationPrompt, capabilitiesFor, chooseLiveEngine, chooseLiveTarget, chooseMicEngine, createEndpoint, detectSpokenLang, emptyLiveBuffers, initialListenLang, isOpenAiAuthStatus, languageFromTranscript, liveDirectionTarget, nextListenLang, OPENAI_AUTH_MESSAGE, parseTranslation, polishTranslation, readEphemeralToken, stepEndpoint, TRANSLATION_MODEL, translationRepeatsSource, UTTERANCE_LIMIT_MS } from '../lib/conversation.js'
 import capabilities from '../api/capabilities.js'
 import liveCall from '../api/live-call.js'
 import speak from '../api/speak.js'
@@ -245,8 +245,8 @@ test('missing keys degrade without calling the providers', async () => {
   globalThis.fetch = async () => { called = true }
   try {
     const caps = mockRes()
-    capabilities({ method: 'GET' }, caps)
-    assert.deepEqual(caps.body, { translate: false, speech: false, live: false })
+    await capabilities({ method: 'GET' }, caps)
+    assert.deepEqual(caps.body, { translate: false, speech: false, live: false, openai: 'missing' })
 
     const translated = mockRes()
     await translate({ method: 'POST', body: { text: 'oi' } }, translated)
@@ -269,6 +269,122 @@ test('missing keys degrade without calling the providers', async () => {
     else process.env.ANTHROPIC_API_KEY = anthropic
     if (openai === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = openai
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('an expired OpenAI key is not treated as a working microphone', () => {
+  assert.equal(isOpenAiAuthStatus(401), true)
+  assert.equal(isOpenAiAuthStatus(403), true)
+  assert.equal(isOpenAiAuthStatus(500), false)
+  assert.deepEqual(capabilitiesFor({ translate: true, openai: 'expired' }), {
+    translate: true,
+    speech: false,
+    live: false,
+    openai: 'expired',
+  })
+  assert.deepEqual(capabilitiesFor({ translate: true, openai: 'ok' }), {
+    translate: true,
+    speech: true,
+    live: true,
+    openai: 'ok',
+  })
+  assert.equal(capabilitiesFor({ translate: false, openai: 'unknown' }).speech, true)
+  assert.equal(chooseMicEngine({ speech: false, canRecord: true, browser: true }), 'browser')
+  assert.equal(chooseMicEngine({ speech: true, canRecord: true, browser: true }), 'server')
+  assert.equal(chooseMicEngine({ speech: null, canRecord: true, browser: true }), 'server')
+  assert.equal(chooseLiveEngine({ live: false, canRecord: true, browser: true }), 'browser')
+  assert.equal(chooseLiveEngine({ live: false, canRecord: true, browser: false }), 'none')
+  assert.equal(chooseLiveEngine({ live: true, canRecord: true, browser: true }), 'server')
+  assert.equal(nextListenLang('pt'), 'es')
+  assert.equal(nextListenLang('es'), 'pt')
+  assert.equal(nextListenLang(null), null)
+  assert.equal(initialListenLang('es-ES'), 'es')
+  assert.equal(initialListenLang('pt-BR'), 'pt')
+})
+
+test('transcription tells the app when the OpenAI key is refused', async () => {
+  const previous = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'sk-expired-test'
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: { message: 'Incorrect API key provided: sk-expired-test' } }),
+  })
+  try {
+    const heard = mockRes()
+    await transcribe({ method: 'POST', body: { audio: 'YQ==', mime: 'audio/webm', language: 'pt' } }, heard)
+    assert.equal(heard.statusCode, 503)
+    assert.equal(heard.body.code, 'openai_auth')
+    assert.equal(heard.body.error, OPENAI_AUTH_MESSAGE)
+    assert.equal(JSON.stringify(heard.body).includes('sk-'), false)
+
+    globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) })
+    const down = mockRes()
+    await transcribe({ method: 'POST', body: { audio: 'YQ==', mime: 'audio/webm' } }, down)
+    assert.equal(down.statusCode, 502)
+    assert.equal(down.body.code, undefined)
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previous
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('capabilities probe marks an expired key before the microphone starts', async () => {
+  const previous = process.env.OPENAI_API_KEY
+  const anthropic = process.env.ANTHROPIC_API_KEY
+  process.env.OPENAI_API_KEY = 'sk-expired-test'
+  process.env.ANTHROPIC_API_KEY = 'test-anthropic'
+  const previousFetch = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return { ok: false, status: 401, json: async () => ({ error: { message: 'Your API key has expired.' } }) }
+  }
+  try {
+    const expired = mockRes()
+    await capabilities({ method: 'GET' }, expired)
+    assert.equal(expired.statusCode, 200)
+    assert.deepEqual(expired.body, { translate: true, speech: false, live: false, openai: 'expired' })
+    assert.match(urls[0], /\/v1\/models\/gpt-transcribe$/)
+    assert.equal(JSON.stringify(expired.body).includes('sk-'), false)
+
+    globalThis.fetch = async () => { throw new Error('offline') }
+    const unknown = mockRes()
+    await capabilities({ method: 'GET' }, unknown)
+    assert.equal(unknown.body.speech, true)
+    assert.equal(unknown.body.openai, 'unknown')
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previous
+    if (anthropic === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = anthropic
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('live call reports a refused OpenAI key', async () => {
+  const previous = process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY = 'sk-expired-test'
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: { message: 'Your API key has expired. Create a new API key to continue.' } }),
+  })
+  try {
+    const res = mockRes()
+    const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n'
+    await liveCall({ method: 'POST', body: { targetLanguage: 'es', sdp } }, res)
+    assert.equal(res.statusCode, 503)
+    assert.equal(res.body.code, 'openai_auth')
+    assert.equal(res.body.error, OPENAI_AUTH_MESSAGE)
+    assert.equal(JSON.stringify(res.body).includes('sk-'), false)
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previous
     globalThis.fetch = previousFetch
   }
 })

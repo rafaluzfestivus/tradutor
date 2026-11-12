@@ -1,4 +1,4 @@
-import { MAX_TEXT_LENGTH, SPEECH_MODEL } from '../lib/conversation.js'
+import { isOpenAiAuthStatus, MAX_TEXT_LENGTH, OPENAI_AUTH_CODE, OPENAI_AUTH_MESSAGE, SPEECH_MODEL } from '../lib/conversation.js'
 
 const VOICES = {
   pt: {
@@ -42,6 +42,9 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       console.error('Speech error:', response.status)
+      if (isOpenAiAuthStatus(response.status)) {
+        return res.status(503).json({ error: OPENAI_AUTH_MESSAGE, code: OPENAI_AUTH_CODE })
+      }
       return res.status(502).json({ error: 'Não consegui gerar a voz.' })
     }
 
